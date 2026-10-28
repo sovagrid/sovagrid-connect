@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Jigokuraku01
+# Additional author attribution terms: see ATTRIBUTION.md.
+name: Connect signed-feed read-only review on disposable Ubuntu VM
+
+# No production signing key, feed opt-in, or persistent server is touched.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sovagrid_connect/release_feed.py'
+      - 'sovagrid_connect/release_feed_remote.py'
+      - 'sovagrid_connect/release_feed_dialog.py'
+      - 'tests/release_feed_vm_client.py'
+      - '.github/workflows/release-feed-vm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-release-feed-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Confirm an empty disposable host
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(cat /proc/1/comm)" = systemd
+          test ! -e /opt/sovagrid-src
+          test ! -e /etc/sovagrid
+          sudo -n id -u | grep -qx 0
+      - name: Build a source bundle with a disposable public trust anchor
+        run: |
+          root="$RUNNER_TEMP/sovagrid-feed-client"
+          mkdir -p "$root"
+          git clone --quiet https://github.com/sovagrid/sovagrid-blueprint.git "$root/sovagrid-blueprint"
+          git -C "$root/sovagrid-blueprint" checkout --quiet --detach 3618aa4
+          for spec in \
+            'sovagrid-hub:ee7117f634dbcc0900e03a9d355f6ac3e53bd251' \
+            'sovagrid-web:618f47bf0352e4efb4cc33b520c46656a976a480' \
+            'sovagrid-agent:0f86e64e2c929caf0ad153aeadb2e90642a67702' \
+            'sovagrid-vpn:0505dd6ed711deb12c35c88adc264240fb68b054'; do
+            name=${spec%%:*}
+            commit=${spec#*:}
+            git clone --quiet "https://github.com/sovagrid/$name.git" "$root/$name"
+            git -C "$root/$name" checkout --quiet --detach "$commit"
+            test "$(git -C "$root/$name" rev-parse HEAD)" = "$commit"
+          done
+          openssl genpkey -algorithm Ed25519 -out "$RUNNER_TEMP/vm-feed-private.pem"
+          openssl pkey -in "$RUNNER_TEMP/vm-feed-private.pem" -pubout -outform DER \
+            -out "$RUNNER_TEMP/vm-feed-public.der"
+          python3 - "$root/sovagrid-blueprint/deploy/release_feed.py" \
+            "$RUNNER_TEMP/vm-feed-public.der" <<'PY'
+          from pathlib import Path
+          import sys
+          source, public = map(Path, sys.argv[1:])
+          der = public.read_bytes()
+          assert der.startswith(bytes.fromhex('302a300506032b6570032100')) and len(der) == 44
+          text = source.read_text()
+          original = 'TRUST_ANCHORS: dict[str, bytes] = {}'
+          assert text.count(original) == 1
+          source.write_text(text.replace(original,
+              'TRUST_ANCHORS: dict[str, bytes] = {"vm-fixture": bytes.fromhex("' +
+              der[12:].hex() + '")}'))
+          PY
+          git -C "$root/sovagrid-blueprint" add deploy/release_feed.py
+          git -C "$root/sovagrid-blueprint" -c user.name='SovaGrid VM Fixture' \
+            -c user.email='vm-fixture@example.invalid' commit -m 'VM fixture: temporary public key'
+          python3 "$root/sovagrid-blueprint/package_server.py" "$RUNNER_TEMP/feed-client.tar.gz"
+      - name: Install exact fixture source and inactive managed units
+        run: |
+          # The remote proof requires a root-owned, non-writable /opt parent.
+          # Hosted images may provision it for shared runner software installs.
+          sudo install -d -o root -g root -m 0755 /opt
+          sudo install -d -o root -g root -m 0755 /opt/sovagrid-src /var/lib/sovagrid
+          sudo install -d -o root -g root -m 0755 /etc/sovagrid
+          sudo tar -xzf "$RUNNER_TEMP/feed-client.tar.gz" -C /opt/sovagrid-src --no-same-owner
+          sudo install -o root -g root -m 0644 \
+            /opt/sovagrid-src/sovagrid-blueprint/deploy/sovagrid-release-feed.service \
+            /etc/systemd/system/sovagrid-release-feed.service
+          sudo install -o root -g root -m 0644 \
+            /opt/sovagrid-src/sovagrid-blueprint/deploy/sovagrid-release-feed.timer \
+            /etc/systemd/system/sovagrid-release-feed.timer
+          printf 'SOVAGRID_RELEASE_FEED_UNITS_V1\n' | \
+            sudo tee /var/lib/sovagrid/.release-feed-units-managed-by-run-sh >/dev/null
+          sudo chmod 0600 /var/lib/sovagrid/.release-feed-units-managed-by-run-sh
+          printf '{"fixture":"one-candidate"}\n' | \
+            sudo tee /etc/sovagrid/auto-update.json >/dev/null
+          sudo chmod 0600 /etc/sovagrid/auto-update.json
+          sudo systemctl daemon-reload
+          ! sudo systemctl is-active --quiet sovagrid-release-feed.timer
+          test ! -e /etc/sovagrid/release-feed.json
+      - name: Prove root and sudo status reject tampering and restore cleanly
+        run: |
+          fingerprint=$(sha256sum "$RUNNER_TEMP/vm-feed-public.der" | cut -d ' ' -f1)
+          sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_RELEASE_FEED_CLIENT_VM_FIXTURE=1 \
+            python3 tests/release_feed_vm_client.py root "$fingerprint"
+          GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_RELEASE_FEED_CLIENT_VM_FIXTURE=1 \
+            python3 tests/release_feed_vm_client.py sudo "$fingerprint"
+          ! sudo systemctl is-active --quiet sovagrid-release-feed.timer
+          test ! -e /etc/sovagrid/release-feed.json
+      - name: Remove the disposable private key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/vm-feed-private.pem"

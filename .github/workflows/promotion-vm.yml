@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Jigokuraku01
+# Additional author attribution terms: see ATTRIBUTION.md.
+name: Connect Agent-only promotion on disposable Ubuntu VM
+
+# Root operations run only for reviewed main commits or maintainer dispatch.
+# Fork pull requests execute the ordinary non-root Connect CI instead.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sovagrid_connect/promotion.py'
+      - 'sovagrid_connect/promotion_protocol.py'
+      - 'sovagrid_connect/promotion_remote.py'
+      - 'sovagrid_connect/promotion_dialog.py'
+      - 'sovagrid_connect/local_operations.py'
+      - 'sovagrid_connect/local_operations_dialog.py'
+      - 'sovagrid_connect/local_commands.py'
+      - 'sovagrid_connect/local_commands_remote.py'
+      - 'sovagrid_connect/local_commands_dialog.py'
+      - 'tests/test_promotion.py'
+      - 'tests/promotion_vm_client.py'
+      - 'tests/local_operations_vm_client.py'
+      - 'tests/local_commands_vm_client.py'
+      - '.github/workflows/promotion-vm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-promotion-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  promotion:
+    name: promotion / ${{ matrix.source.version }} / ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      SOVAGRID_PROMOTION_VM_VERSION: ${{ matrix.source.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [root, sudo]
+        source:
+          - version: '0.3.9'
+            release: v0.3.9-preview
+            archive_sha: a812024d044f1b4746b8302ecae2e7d36f1af355586a763a4839a3c09a47c41a
+            manifest_sha: 8a844437b56bea4d7122ae2c2012ec1bc2bdb4f72037fa6a2ea11b2201a887eb
+          - version: '0.4.0'
+            release: v0.4.0-preview
+            archive_sha: c38d4ea2818dd7e7317707088bc007fd90c8dca944dc41d3ff16b4617648fc62
+            manifest_sha: 7e11c59b3a089179a2945db24f7fccd0adcf931ec9c727258d080a8d2315383e
+          - version: '0.5.1'
+            release: v0.5.1-preview
+            archive_sha: c18b067bdb5061f9307df7ed1794b0a3c8f661bb1f0700207e33e8438169c537
+            manifest_sha: 30bb872c4977c6e80e2868a8a12c4211e5c25ef1a974d859e3c35fc40c61bbfc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: sovagrid/sovagrid-blueprint
+          ref: f251b048286dd894883d733f2b13f39de2c33d6d
+          path: blueprint-fixture
+          persist-credentials: false
+      - name: Confirm disposable VM and root prerequisites
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(cat /proc/1/comm)" = systemd
+          test -d /opt && test ! -L /opt
+          sudo -n install -d -o root -g root -m 0755 /opt
+          test "$(stat -c '%u:%a' /opt)" = 0:755
+          sudo -n systemctl start docker
+          sudo -n docker info >/dev/null
+          sudo -n docker compose version
+          test ! -e /opt/sovagrid-src
+          test ! -e /etc/sovagrid
+      - name: Download exact published server source
+        env:
+          RELEASE_URL: https://github.com/sovagrid/sovagrid-blueprint/releases/download/${{ matrix.source.release }}/SovaGrid-server-source-${{ matrix.source.version }}.tar.gz
+          EXPECTED_ARCHIVE_SHA: ${{ matrix.source.archive_sha }}
+          EXPECTED_MANIFEST_SHA: ${{ matrix.source.manifest_sha }}
+        run: |
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 --silent --show-error \
+            "$RELEASE_URL" -o "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          printf '%s  %s\n' \
+            "$EXPECTED_ARCHIVE_SHA" \
+            "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz" | sha256sum --check -
+          mkdir "$RUNNER_TEMP/sovagrid-promotion-source"
+          tar -xzf "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz" \
+            -C "$RUNNER_TEMP/sovagrid-promotion-source" --no-same-owner
+          test "$(sha256sum "$RUNNER_TEMP/sovagrid-promotion-source/sovagrid-bundle.json" | cut -d ' ' -f1)" = \
+            "$EXPECTED_MANIFEST_SHA"
+      - name: Start a real external Agent and inert transport units
+        run: |
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py seed "$RUNNER_TEMP/sovagrid-promotion-source"
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py inspect eligible \
+            "$RUNNER_TEMP/sovagrid-promotion-source/sovagrid-blueprint/deploy/promote_agent_only.py"
+      - name: Pin manifest without changing the external Agent
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_PROMOTION_VM_VERSION="$SOVAGRID_PROMOTION_VM_VERSION" SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+              python3 tests/promotion_vm_client.py root prepare \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/promotion_vm_client.py sudo prepare \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          fi
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py inspect prepared \
+            "$RUNNER_TEMP/sovagrid-promotion-source/sovagrid-blueprint/deploy/promote_agent_only.py"
+      - name: Reject a changed archive before installing source
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_PROMOTION_VM_VERSION="$SOVAGRID_PROMOTION_VM_VERSION" SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+              python3 tests/promotion_vm_client.py root wrong-stage \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/promotion_vm_client.py sudo wrong-stage \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          fi
+          test ! -e /opt/sovagrid-src
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py external
+      - name: Run Connect's exact content-addressed stage program
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_PROMOTION_VM_VERSION="$SOVAGRID_PROMOTION_VM_VERSION" SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+              python3 tests/promotion_vm_client.py root stage \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/promotion_vm_client.py sudo stage \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          fi
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py inspect source_staged \
+            /opt/sovagrid-src/sovagrid-blueprint/deploy/promote_agent_only.py
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py external
+      - name: Run Connect's Hub-only action without stopping external services
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_PROMOTION_VM_VERSION="$SOVAGRID_PROMOTION_VM_VERSION" SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+              python3 tests/promotion_vm_client.py root hub \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/promotion_vm_client.py sudo hub \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          fi
+          sudo test "$(sudo stat -c %a /var/lib/sovagrid-promotion/hub-install.log)" = 600
+          sudo test "$(sudo stat -c %s /var/lib/sovagrid-promotion/hub-install.log)" -le 2097200
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py inspect hub_installed \
+            /opt/sovagrid-src/sovagrid-blueprint/deploy/promote_agent_only.py
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py external
+      - name: Activate only the separate local Agent and prove fresh metrics
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_PROMOTION_VM_VERSION="$SOVAGRID_PROMOTION_VM_VERSION" SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+              python3 tests/promotion_vm_client.py root activate \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/promotion_vm_client.py sudo activate \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          fi
+          sudo test "$(sudo stat -c %a /var/lib/sovagrid-promotion/local-agent-activation.log)" = 600
+          sudo test "$(sudo stat -c %s /var/lib/sovagrid-promotion/local-agent-activation.log)" -le 2097200
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py inspect activated \
+            /opt/sovagrid-src/sovagrid-blueprint/deploy/promote_agent_only.py
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py local
+      - name: Prove real Hub SSH grant and fresh metric through loopback
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              RUNNER_TEMP="$RUNNER_TEMP" SOVAGRID_PROMOTION_VM_VERSION="$SOVAGRID_PROMOTION_VM_VERSION" SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+              python3 tests/promotion_vm_client.py root panel \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/promotion_vm_client.py sudo panel \
+              "$RUNNER_TEMP/sovagrid-promotion-source" "$RUNNER_TEMP/sovagrid-$SOVAGRID_PROMOTION_VM_VERSION.tar.gz"
+          fi
+      - name: Exercise Connect command opt-in and local feature CAS against installed 0.5.1
+        if: matrix.source.version == '0.5.1'
+        run: |
+          if [ '${{ matrix.mode }}' = root ]; then
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/local_commands_vm_client.py root
+            sudo -n -- env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+              SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/local_operations_vm_client.py root
+          else
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/local_commands_vm_client.py sudo
+            SOVAGRID_PROMOTION_VM_FIXTURE=1 python3 tests/local_operations_vm_client.py sudo
+          fi
+          sudo GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted SOVAGRID_PROMOTION_VM_FIXTURE=1 \
+            python3 blueprint-fixture/tests/promotion_vm.py external

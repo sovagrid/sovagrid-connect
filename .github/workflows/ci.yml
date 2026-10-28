@@ -1,0 +1,136 @@
+name: Connect CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python-version: ['3.9', '3.13']
+        include:
+          - os: ubuntu-24.04
+            python-version: '3.9'
+          - os: ubuntu-26.04
+            python-version: '3.13'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Verify OpenSSH is installed
+        run: python -c "import shutil; assert shutil.which('ssh') and shutil.which('ssh-keygen'), 'OpenSSH Client is required for these tests'"
+      - name: Test connector and OpenSSH configuration
+        run: python -m unittest discover -s tests -v
+      - name: Verify Hub-only SSH stage and digest guard on disposable Ubuntu
+        if: matrix.os == 'ubuntu-24.04'
+        run: sudo -n env PYTHONPATH="$PWD:$PWD/tests" SOVAGRID_HUB_STAGE_E2E=1 /usr/bin/python3 -m unittest discover -s tests -p 'test_hub_only_stage_e2e.py' -v
+      - name: Install isolated GUI test display
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk xvfb xauth
+      - name: Check real Tk enrollment and public HTTPS dialogs
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          SOVAGRID_GUI_TESTS: '1'
+        run: timeout --signal=TERM --kill-after=10s 90s xvfb-run -a /usr/bin/python3 -u -m unittest discover -s tests -p 'test_*_dialog.py' -v
+
+  bundle:
+    name: Bundle / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: .venv/bin/python
+          - os: windows-latest
+            python: python
+          - os: macos-latest
+            python: python
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.13.16'
+      - name: Prepare Linux Python with Tk
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk python3-venv zip
+          /usr/bin/python3 -m venv .venv
+      - name: Install build tools and connector
+        run: ${{ matrix.python }} -m pip install "pyinstaller==6.22.3" .
+      - name: Check bundler prerequisites
+        run: ${{ matrix.python }} -c "import tkinter, shutil; assert shutil.which('ssh'), 'system OpenSSH is required'"
+      - name: Build command line executable
+        run: ${{ matrix.python }} -m PyInstaller --noconfirm --clean --onedir --collect-data sovagrid_connect --name SovaGrid-Connect-CLI --specpath build/spec bundle/cli.py
+      - name: Build graphical executable
+        run: ${{ matrix.python }} -m PyInstaller --noconfirm --clean --onedir --windowed --collect-data sovagrid_connect --name SovaGrid-Connect-GUI --specpath build/spec bundle/gui.py
+      - name: Build SSH prompt helper on Windows
+        if: runner.os == 'Windows'
+        run: ${{ matrix.python }} -m PyInstaller --noconfirm --clean --onedir --hide-console hide-early --name SovaGrid-Connect-Askpass --specpath build/spec bundle/askpass.py
+      - name: Build SSH prompt helper on macOS
+        if: runner.os == 'macOS'
+        run: ${{ matrix.python }} -m PyInstaller --noconfirm --clean --onefile --name SovaGrid-Connect-Askpass --specpath build/spec bundle/askpass.py
+      - name: Build SSH prompt helper on Linux
+        if: runner.os == 'Linux'
+        run: ${{ matrix.python }} -m PyInstaller --noconfirm --clean --onedir --name SovaGrid-Connect-Askpass --specpath build/spec bundle/askpass.py
+      - name: Embed SSH prompt helper in GUI
+        run: ${{ matrix.python }} bundle/package_helper.py
+      - name: Use documented Windows redistributable runtime
+        if: runner.os == 'Windows'
+        run: ${{ matrix.python }} bundle/normalize_windows_runtime.py
+      - name: Collect exact Ubuntu native library notices
+        if: runner.os == 'Linux'
+        run: ${{ matrix.python }} bundle/collect_linux_native_notices.py --dist dist --output build/linux-notices
+      - name: Package Linux third-party notices
+        if: runner.os == 'Linux'
+        run: ${{ matrix.python }} bundle/package_notices.py --linux-notices build/linux-notices
+      - name: Package Windows third-party notices
+        if: runner.os == 'Windows'
+        run: ${{ matrix.python }} bundle/package_notices.py --windows-runtime build/windows-runtime.json
+      - name: Package macOS third-party notices
+        if: runner.os == 'macOS'
+        run: ${{ matrix.python }} bundle/package_notices.py
+      - name: Re-sign macOS app after embedding helper
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/SovaGrid-Connect-GUI.app
+          codesign --verify --deep dist/SovaGrid-Connect-GUI.app
+      - name: Smoke test packaged entry points
+        run: ${{ matrix.python }} bundle/smoke.py
+      - name: Add bundle instructions
+        run: ${{ matrix.python }} -c "import shutil; shutil.copyfile('BUNDLE_README.md', 'dist/README.md'); [shutil.copyfile(name, 'dist/' + name) for name in ('LICENSE', 'ATTRIBUTION.md', 'NOTICE')]"
+      - name: Archive Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist -DestinationPath SovaGrid-Connect-${{ runner.os }}-${{ runner.arch }}.zip
+      - name: Archive macOS bundle with app links
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist SovaGrid-Connect-${{ runner.os }}-${{ runner.arch }}.zip
+      - name: Archive Linux bundle with executable modes and links
+        if: runner.os == 'Linux'
+        run: zip -qry SovaGrid-Connect-${{ runner.os }}-${{ runner.arch }}.zip dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SovaGrid-Connect-${{ runner.os }}-${{ runner.arch }}
+          path: SovaGrid-Connect-${{ runner.os }}-${{ runner.arch }}.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
