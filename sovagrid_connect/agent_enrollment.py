@@ -192,7 +192,12 @@ class AgentEnrollment:
     def _target_payload(self, **extra):
         return {"protocol": 1, **self._identity(), "expected": self.record["cas"]["target"], **extra}
 
-    def _login(self, username, password, credentials):
+    def _login(self, username, password, credentials, session_token):
+        if session_token is not None:
+            if username is not None or password is not None or credentials is not None:
+                raise EnrollmentError("Выберите один способ подтверждения прав Hub.")
+            self.api.adopt_bearer(session_token)
+            return
         if credentials is not None:
             if type(credentials) is not dict or set(credentials) != {"username", "password"}:
                 raise EnrollmentError("Введите логин и пароль центра мониторинга.")
@@ -206,7 +211,7 @@ class AgentEnrollment:
                 credentials.clear()
 
     def prepare(self, *, target_options, name, bundle, hub_host, hub_port, local_port,
-                username=None, password=None, credentials=None):
+                username=None, password=None, credentials=None, session_token=None):
         self._guard()
         if self.record is not None:
             raise EnrollmentError("Установка уже подготовлена. Возобновите её или завершите очистку.")
@@ -218,7 +223,7 @@ class AgentEnrollment:
         target_connection = _connection(target_options)
         endpoint = _endpoint(hub_host, hub_port, local_port)
         self.progress("Подтверждаем права администратора центра мониторинга…")
-        self._login(username, password, credentials)
+        self._login(username, password, credentials, session_token)
         password = None
         if self.api.get(request_id) is not None:
             raise EnrollmentError("Идентификатор новой установки уже занят.")
@@ -237,6 +242,7 @@ class AgentEnrollment:
             "cas": {"hub": None, "target": None}, "stage": None})
         self._bind_hub(hub)
         self.progress("Передаём проверенный временный пакет для проверки сервера…")
+        self.api.verify()
         reply = self._target_call("target-preview", {"protocol": 1, "request_id": request_id})
         self._bind_target(reply)
         self._guard(); self._reviewed = True
@@ -244,7 +250,7 @@ class AgentEnrollment:
                 "source_commits": summary.commits, "hub_fingerprint": public_key_fingerprint(hub["hub_host_key"])}
 
     def resume(self, request_id, *, username=None, password=None, credentials=None,
-               target_identity=_UNSET, jump_identity=_UNSET, bundle_path=None):
+               session_token=None, target_identity=_UNSET, jump_identity=_UNSET, bundle_path=None):
         self._guard()
         if self.record is not None:
             raise EnrollmentError("Сначала завершите текущую проверку установки.")
@@ -265,10 +271,11 @@ class AgentEnrollment:
             raise EnrollmentError("Сохранённый серверный пакет изменился. Возобновление остановлено.")
         if selected != self.record["bundle"]:
             self._save(bundle=selected)
-        self._login(username, password, credentials); password = None
+        self._login(username, password, credentials, session_token); password = None
         self._rpcs()
         self.hub.preflight(); target_platform = self.target.preflight()
         self._bind_hub(self.hub.call("hub-preview", {"protocol": 1}))
+        self.api.verify()
         reply = self._target_call("target-preview", {"protocol": 1, "request_id": request_id})
         target = reply["target"]
         known_target = target or self.record["target"]
@@ -289,6 +296,7 @@ class AgentEnrollment:
         try:
             # Repeating prepare preserves all generated IDs and credentials.
             self.progress("Подготавливаем отдельный Agent и его защищённые данные…")
+            self.api.verify()
             reply = self._target_call("target-prepare", {"protocol": 1, "request_id": self.record["request_id"],
                 "expected": self.record["cas"]["target"]})
             self._bind_target(reply); self._guard()
@@ -300,6 +308,7 @@ class AgentEnrollment:
                     raise EnrollmentError("В Hub найден другой ключ этого сервера. Установка остановлена.")
                 self._save(hub_authorized=True, cas={**self.record["cas"], "hub": status["cas"]})
             else:
+                self.api.verify()
                 reply = self.hub.call("hub-authorize", {"protocol": 1, "enrollment_id": target["enrollment_id"],
                     "server_id": target["server_id"], "expected": self.record["cas"]["hub"],
                     "ssh_public_key": target["ssh_public_key"], "ssh_key_fingerprint": target["ssh_key_fingerprint"]})
@@ -307,6 +316,7 @@ class AgentEnrollment:
             self._guard()
             if PHASES.index(self.record["phase"]) < PHASES.index("transport_ready"):
                 endpoint = self.record["hub_endpoint"]
+                self.api.verify()
                 reply = self._target_call("target-transport", self._target_payload(
                     hub_host=endpoint["host"], hub_port=endpoint["port"], local_port=endpoint["local_port"], **self.record["hub_trust"]))
                 self._bind_target(reply); self._guard()
@@ -316,6 +326,7 @@ class AgentEnrollment:
             self._save(registration=registration); self._guard()
             # The phase is persisted before systemd starts the service. Replay
             # even on registered/active to finish a lost start response safely.
+            self.api.verify()
             reply = self._target_call("target-registered", self._target_payload(registration=registration))
             self._bind_target(reply); self._guard()
             self.progress("Ждём первое измерение нового сервера…")
@@ -331,6 +342,7 @@ class AgentEnrollment:
                 if time.monotonic() >= deadline:
                     raise EnrollmentError("Agent ещё не прислал измерение. Сохранённую установку можно возобновить.")
                 self._stop.wait(1)
+            self.api.verify()
             reply = self._target_call("target-activate", self._target_payload(registration=registration))
             self._bind_target(reply)
             self._save(cleanup_required=False)
@@ -369,6 +381,7 @@ class AgentEnrollment:
         self.progress("Проверяем результат прерванной установки на обеих машинах…")
         try:
             self._bind_hub(self.hub.call("hub-preview", {"protocol": 1}))
+            self.api.verify()
             status = self._target_call("target-status", {"protocol": 1, "request_id": self.record["request_id"]})
             known_target = status["target"] or self.record["target"]
             registration = self.api.get(known_target["enrollment_id"]) if known_target is not None else None
@@ -377,12 +390,14 @@ class AgentEnrollment:
             if registration is not None and registration["state"] == "active":
                 # The first sample won the race: do not erase a working Agent.
                 self._save(registration=registration, cleanup_required=False)
+                self.api.verify()
                 reply = self._target_call("target-activate", self._target_payload(registration=registration))
                 self._bind_target(reply); self._clean_stage()
                 self.progress("Agent успел подключиться. Работающая установка сохранена.")
                 return {"removed": False, "active": True, "record": self.record}
             if registration is not None and registration["state"] == "pending":
                 try:
+                    self.api.verify()
                     registration = self.api.cancel(target["enrollment_id"], registration["revision"])
                 except EnrollmentAPIError as error:
                     if error.status == 409:
@@ -392,6 +407,7 @@ class AgentEnrollment:
                 self._save(registration=registration)
             if target is not None:
                 self.progress("Удаляем только данные и службы этой незавершённой установки…")
+                self.api.verify()
                 self._target_call("target-remove", self._target_payload(registration=registration))
                 status = self.hub.call("hub-status", {"protocol": 1, "enrollment_id": target["enrollment_id"], "server_id": target["server_id"]})
                 # A durable, partially created enrollment may own an account
@@ -400,6 +416,7 @@ class AgentEnrollment:
                 if status["ssh_key_fingerprint"] is not None:
                     if status["ssh_key_fingerprint"] != target["ssh_key_fingerprint"]:
                         raise EnrollmentError("Ключ в Hub изменился. Чужое подключение не будет затронуто.")
+                    self.api.verify()
                     self.hub.call("hub-revoke", {"protocol": 1, "enrollment_id": target["enrollment_id"],
                         "server_id": target["server_id"], "expected": status["cas"], "ssh_key_fingerprint": target["ssh_key_fingerprint"]})
             self._clean_stage()

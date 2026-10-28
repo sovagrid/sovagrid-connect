@@ -39,6 +39,7 @@ class World:
         self.hub_fingerprint = None; self.hub_uid_present = False
         self.fail_after_registered_phase = False; self.fail_after_hub_entry = False
         self.require_service_when_polling = False
+        self.verify_count = 0; self.revoke_at_verify = None
         self.versions = {'hub': 1, 'target': 1}
         self.trust = {'hub_host_key': PUBLIC_KEY, 'hub_ca_pem': PUBLIC_CA}
 
@@ -51,6 +52,13 @@ class World:
         class API:
             def login(self, user, password):
                 world.log.append(('login', user))
+            def adopt_bearer(self, token):
+                world.log.append(('borrow-browser-session', len(token)))
+            def verify(self):
+                world.verify_count += 1
+                if world.verify_count == world.revoke_at_verify:
+                    raise EnrollmentAPIError('Session revoked', 401)
+                world.log.append(('verify-admin',))
             def get(self, identifier):
                 row = world.registration
                 if row is None or row['id'] != identifier: return None
@@ -174,6 +182,27 @@ class EnrollmentControllerTests(unittest.TestCase):
         self.assertNotIn('private-fixture-password', text)
         self.assertNotIn('agent_token"', text); self.assertNotIn('PRIVATE KEY', text)
         self.assertIsNotNone(self.journal.load(result['record']['request_id'])['stage'])
+
+    def test_prepare_borrows_browser_session_without_persisting_or_requiring_password(self):
+        bearer = 'b' * 43
+        result = self.controller.prepare(target_options=ConnectionOptions(host='target.example', user='operator'),
+            name='Target', bundle=self.source['path'], hub_host='192.0.2.1', hub_port=22, local_port=18767,
+            session_token=bearer)
+        self.assertEqual(result['record']['phase'], 'prepared')
+        self.assertIn(('borrow-browser-session', 43), self.world.log)
+        self.assertNotIn(bearer, next((self.root / 'records').glob('*.json')).read_text())
+        with self.assertRaises(EnrollmentError):
+            self.new_controller().prepare(target_options=ConnectionOptions(host='target.example', user='operator'),
+                name='Target', bundle=self.source['path'], hub_host='192.0.2.1', hub_port=22,
+                local_port=18767, username='owner', password='fixture', session_token=bearer)
+
+    def test_revocation_before_apply_does_not_prepare_remote_agent(self):
+        self.prepare()
+        self.world.revoke_at_verify = self.world.verify_count + 1
+        with self.assertRaises(EnrollmentAPIError): self.controller.apply()
+        self.assertIsNone(self.world.target)
+        self.assertFalse(any(action in ('target-prepare', 'hub-authorize') for action, *_ in self.world.log))
+        self.assertTrue(self.controller.record['cleanup_required'])
 
     def test_successful_order_activates_only_after_observed_metric_and_removes_temporary_package(self):
         self.prepare(); record = self.controller.apply()

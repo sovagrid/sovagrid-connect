@@ -64,6 +64,16 @@ def _identity(payload):
     return user["id"], user["username"], user["role"]
 
 
+def _unrestricted_access(payload):
+    access = payload.get("access") if isinstance(payload, dict) and set(payload) == {"access"} else None
+    if (not isinstance(access, dict) or set(access) != {"mode", "revision", "unrestricted_admin"}
+            or access["mode"] != "all" or type(access["revision"]) is not int
+            or not 0 <= access["revision"] <= 2**63 - 1
+            or access["unrestricted_admin"] is not True):
+        raise EnrollmentAPIError("Для установки Agent нужен администратор с доступом ко всем серверам.", 403)
+    return access["mode"], access["revision"], access["unrestricted_admin"]
+
+
 def enrollment_reply(payload, enrollment_id, *, required=False):
     if (not isinstance(payload, dict) or set(payload) != {"protocol", "enrollment"}
             or type(payload["protocol"]) is not int or payload["protocol"] != 1):
@@ -106,6 +116,8 @@ class EnrollmentAPI:
         self._epoch = 0
         self._token = None
         self._identity = None
+        self._access = None
+        self._owned_token = False
         self._connected()
 
     def _connected(self):
@@ -115,7 +127,7 @@ class EnrollmentAPI:
     def _response_limit(self, method, path):
         return MAX_RESPONSE
 
-    def _request(self, method, path, body=None, *, token=None):
+    def _request(self, method, path, body=None, *, token=None, epoch=None):
         self._connected()
         response_limit = self._response_limit(method, path)
         if type(response_limit) is not int or not MAX_RESPONSE <= response_limit <= 256 * 1024:
@@ -152,8 +164,9 @@ class EnrollmentAPI:
             error.close()
             if status in (401, 403):
                 with self._lock:
-                    if token is not None and self._token == token:
+                    if epoch is not None and self._token == token and self._epoch == epoch:
                         self._epoch += 1; self._token = None; self._identity = None
+                        self._access = None; self._owned_token = False
             messages = {401: "Сеанс Hub завершён. Войдите снова.", 403: "Нужны права администратора Hub.",
                 404: "Обновите Hub для установки удалённых Agent.", 409: "Состояние установки изменилось. Обновите его перед продолжением.",
                 429: "Hub временно ограничил запросы. Повторите позже."}
@@ -175,9 +188,9 @@ class EnrollmentAPI:
         with self._lock:
             self._epoch += 1
             epoch = self._epoch
-            previous = self._token
-            self._token = None; self._identity = None
-        if previous:
+            previous, previous_owned = self._token, self._owned_token
+            self._token = None; self._identity = None; self._access = None; self._owned_token = False
+        if previous and previous_owned:
             try:
                 self._request("DELETE", "/api/v1/session", token=previous)
             except EnrollmentAPIError:
@@ -192,7 +205,7 @@ class EnrollmentAPI:
             with self._lock:
                 if epoch != self._epoch:
                     raise EnrollmentAPIError("Вход отменён. Откройте установку снова.")
-                self._token = token; self._identity = identity
+                self._token = token; self._identity = identity; self._owned_token = True
         except EnrollmentAPIError:
             try:
                 self._request("DELETE", "/api/v1/session", token=token)
@@ -200,26 +213,61 @@ class EnrollmentAPI:
                 pass
             raise
 
+    def adopt_bearer(self, token):
+        """Borrow a browser admin session. Never revoke it on close or failure.
+
+        The bearer stays only in this object; the durable enrollment journal
+        receives public IDs and digests, never this credential.
+        """
+        if not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", token) is None:
+            raise ValueError("Неверный сеанс Hub для установки Agent.")
+        with self._lock:
+            self._epoch += 1
+            epoch = self._epoch
+            previous, previous_owned = self._token, self._owned_token
+            self._token = None; self._identity = None; self._access = None; self._owned_token = False
+        if previous and previous_owned:
+            try:
+                self._request("DELETE", "/api/v1/session", token=previous)
+            except EnrollmentAPIError:
+                pass
+        identity = _identity(self._request("GET", "/api/v1/session", token=token))
+        access = _unrestricted_access(self._request("GET", "/api/v1/session/access", token=token))
+        with self._lock:
+            if epoch != self._epoch:
+                raise EnrollmentAPIError("Вход отменён. Откройте установку снова.")
+            self._token = token; self._identity = identity; self._access = access
+
     def _session(self):
         with self._lock:
-            token, identity, epoch = self._token, self._identity, self._epoch
+            token, identity, access, epoch = self._token, self._identity, self._access, self._epoch
         if token is None:
             raise EnrollmentAPIError("Войдите в Hub для установки Agent.")
-        reply = self._request("GET", "/api/v1/session", token=token)
+        reply = self._request("GET", "/api/v1/session", token=token, epoch=epoch)
         with self._lock:
             if self._token != token or self._epoch != epoch:
                 raise EnrollmentAPIError("Сеанс установки завершён.")
         try:
             if _identity(reply) != identity:
                 raise EnrollmentAPIError("Учётная запись Hub изменилась. Войдите снова.")
+            if access is not None:
+                current_access = _unrestricted_access(self._request(
+                    "GET", "/api/v1/session/access", token=token, epoch=epoch))
+                if current_access != access:
+                    raise EnrollmentAPIError("Права доступа Hub изменились. Откройте установку снова.", 403)
         except EnrollmentAPIError:
             with self._lock:
-                if self._token == token:
+                if self._token == token and self._epoch == epoch:
+                    owned = self._owned_token
                     self._epoch += 1; self._token = None; self._identity = None
-            try:
-                self._request("DELETE", "/api/v1/session", token=token)
-            except EnrollmentAPIError:
-                pass
+                    self._access = None; self._owned_token = False
+                else:
+                    owned = False
+            if owned:
+                try:
+                    self._request("DELETE", "/api/v1/session", token=token)
+                except EnrollmentAPIError:
+                    pass
             raise
         with self._lock:
             if self._token != token or self._epoch != epoch:
@@ -231,11 +279,15 @@ class EnrollmentAPI:
         with self._lock:
             if self._token != token or self._epoch != epoch:
                 raise EnrollmentAPIError("Сеанс установки завершён.")
-        reply = self._request(method, path, body, token=token)
+        reply = self._request(method, path, body, token=token, epoch=epoch)
         with self._lock:
             if self._token != token or self._epoch != epoch:
                 raise EnrollmentAPIError("Сеанс установки завершён. Войдите снова и проверьте её состояние.")
         return reply
+
+    def verify(self):
+        """Recheck the live admin session before a remote root-side effect."""
+        self._session()
 
     def get(self, enrollment_id):
         _uuid(enrollment_id)
@@ -265,9 +317,10 @@ class EnrollmentAPI:
 
     def logout(self):
         with self._lock:
-            token = self._token
+            token, owned = self._token, self._owned_token
             self._epoch += 1; self._token = None; self._identity = None
-        if token:
+            self._access = None; self._owned_token = False
+        if token and owned:
             try:
                 self._request("DELETE", "/api/v1/session", token=token)
             except EnrollmentAPIError:

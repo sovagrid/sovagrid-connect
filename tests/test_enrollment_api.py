@@ -15,8 +15,10 @@ import uuid
 from sovagrid_connect.enrollment_api import EnrollmentAPI, EnrollmentAPIError, enrollment_reply
 
 TOKEN = 'test-admin-token-for-local-fixture'
+BORROWED = 'b' * 43
 EID, SID = str(uuid.uuid4()), str(uuid.uuid4())
 USER = {'id': str(uuid.uuid4()), 'username': 'owner', 'role': 'admin', 'enabled': True}
+ACCESS = {'access': {'mode': 'all', 'revision': 0, 'unrestricted_admin': True}}
 
 
 class Tunnel:
@@ -40,7 +42,9 @@ class Harness:
         self.calls.append(request)
         value = self.hook(request) if self.hook else None
         if value is None:
-            if request.full_url.endswith('/session'):
+            if request.full_url.endswith('/session/access'):
+                value = ACCESS
+            elif request.full_url.endswith('/session'):
                 value = {'user': dict(USER)}
                 if request.method == 'POST':
                     value['token'] = TOKEN
@@ -51,6 +55,93 @@ class Harness:
 
 
 class EnrollmentAPITests(unittest.TestCase):
+    def test_borrowed_browser_admin_session_registers_without_login_or_revoking_browser(self):
+        h = Harness(); h.client.adopt_bearer(BORROWED)
+        self.assertEqual([req.method for req in h.calls], ['GET', 'GET'])
+        self.assertEqual(h.client.register(EID, SID, 'Target', '1' * 64), record())
+        self.assertEqual([req.method for req in h.calls], ['GET', 'GET', 'GET', 'GET', 'POST'])
+        self.assertEqual(h.calls[-1].get_header('Authorization'), 'Bearer ' + BORROWED)
+        self.assertNotIn(BORROWED, repr(h.client))
+        self.assertTrue(all(BORROWED not in req.full_url for req in h.calls))
+        h.client.logout()
+        self.assertEqual(h.calls[-1].method, 'POST')
+        self.assertIsNone(h.client._token)
+
+    def test_borrowed_session_refuses_limited_or_malformed_access_before_registration(self):
+        for access in [
+            {'access': {'mode': 'selected', 'revision': 1, 'unrestricted_admin': False}},
+            {'access': {'mode': 'all', 'revision': True, 'unrestricted_admin': True}},
+            {'access': {'mode': 'all', 'revision': 0, 'unrestricted_admin': True, 'secret': 'unexpected'}},
+        ]:
+            with self.subTest(access=access):
+                h = Harness(lambda req: access if req.full_url.endswith('/session/access') else None)
+                with self.assertRaises(EnrollmentAPIError): h.client.adopt_bearer(BORROWED)
+                self.assertIsNone(h.client._token)
+                self.assertFalse(any(req.method == 'POST' or req.method == 'DELETE' for req in h.calls))
+
+    def test_borrowed_session_detects_access_revision_change_before_mutation(self):
+        revision = 0
+        def hook(req):
+            if req.full_url.endswith('/session/access'):
+                return {'access': ACCESS['access'] | {'revision': revision}}
+        h = Harness(hook); h.client.adopt_bearer(BORROWED); revision = 1
+        with self.assertRaises(EnrollmentAPIError):
+            h.client.register(EID, SID, 'Target', '1' * 64)
+        self.assertIsNone(h.client._token)
+        self.assertFalse(any('/agent-enrollments/' in req.full_url or req.method == 'DELETE' for req in h.calls))
+
+    def test_borrowed_session_detects_role_change_and_never_revokes_browser_token(self):
+        role = 'admin'
+        def hook(req):
+            if req.full_url.endswith('/session'):
+                return {'user': USER | {'role': role}}
+        h = Harness(hook); h.client.adopt_bearer(BORROWED); role = 'viewer'
+        with self.assertRaises(EnrollmentAPIError):
+            h.client.register(EID, SID, 'Target', '1' * 64)
+        self.assertIsNone(h.client._token)
+        self.assertFalse(any('/agent-enrollments/' in req.full_url or req.method == 'DELETE' for req in h.calls))
+
+    def test_revoked_browser_token_cannot_be_replayed_into_enrollment(self):
+        def hook(req):
+            if req.full_url.endswith('/session'):
+                raise HTTPError(req.full_url, 401, 'revoked', {}, io.BytesIO(b'{}'))
+        h = Harness(hook)
+        with self.assertRaises(EnrollmentAPIError): h.client.adopt_bearer(BORROWED)
+        self.assertIsNone(h.client._token)
+        self.assertFalse(any('/agent-enrollments/' in req.full_url or req.method == 'DELETE' for req in h.calls))
+
+    def test_replacing_borrowed_session_does_not_delete_it(self):
+        h = Harness(); h.client.adopt_bearer(BORROWED)
+        h.client.login('owner', 'fixture-password')
+        self.assertFalse(any(req.method == 'DELETE' and req.get_header('Authorization') == 'Bearer ' + BORROWED
+                             for req in h.calls))
+        h.client.logout()
+        self.assertEqual(h.calls[-1].method, 'DELETE')
+        self.assertEqual(h.calls[-1].get_header('Authorization'), 'Bearer ' + TOKEN)
+
+    def test_stale_http_error_cannot_clear_re_adopted_same_browser_token(self):
+        started = threading.Event(); release = threading.Event(); errors = []
+        block_once = False
+        def hook(req):
+            nonlocal block_once
+            if block_once and req.method == 'GET' and req.full_url.endswith('/session'):
+                block_once = False
+                started.set(); self.assertTrue(release.wait(3))
+                raise HTTPError(req.full_url, 401, 'stale', {}, io.BytesIO(b'{}'))
+        h = Harness(hook); h.client.adopt_bearer(BORROWED)
+        block_once = True
+        def get():
+            try: h.client.get(EID)
+            except EnrollmentAPIError as error: errors.append(error)
+        thread = threading.Thread(target=get); thread.start()
+        self.assertTrue(started.wait(3))
+        h.client.adopt_bearer(BORROWED)
+        release.set(); thread.join(3)
+        self.assertFalse(thread.is_alive()); self.assertTrue(errors)
+        self.assertEqual(h.client._token, BORROWED)
+        h.client.logout()
+        self.assertFalse(any(req.method == 'DELETE' for req in h.calls))
+
     def test_only_verified_live_loopback_tunnel_is_accepted(self):
         for url in ['http://example.com', 'https://127.0.0.1:80', 'http://localhost:80',
                     'http://127.0.0.1:80/?secret', 'http://a:b@127.0.0.1:80', 'http://127.0.0.1:80/path']:
