@@ -6,15 +6,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import uuid
 
 from .host_backup import (HostArchive, HostBackupController, HostBackupOperation,
-                          HostBackupPlan, HostBackupState)
+                          HostBackupPlan, HostBackupState, HostPortableOperation,
+                          HostPortablePair)
 from .installer import InstallError
 
 
@@ -25,7 +27,7 @@ def _archive_text(archive: HostArchive) -> str:
         f"Копия: {archive.id}", f"Создана: {when}", f"Установка: {layout}",
         f"Размер архива: {archive.bytes:,} байт", f"Объектов: {archive.files:,}",
         "Целостность: проверена" if archive.verified else "Целостность: ещё не проверена",
-        "Архив хранится только на сервере. Доступ к нему имеет root.",
+        "Оригинал хранится в закрытом каталоге сервера. Доступ к нему имеет root.",
     ))
 
 
@@ -66,6 +68,16 @@ def _operation_text(operation: HostBackupOperation) -> str:
     return "\n".join(lines)
 
 
+def _portable_text(pair: HostPortablePair) -> str:
+    images = ", ".join(sorted(pair.image_receipt["images"]))
+    return "\n".join((
+        "Переносимая копия проверена на сервере.",
+        f"Архив: {pair.archive.id} · {pair.archive.bytes:,} байт",
+        f"Образы Docker: {images} · {pair.image_bytes:,} байт",
+        "Можно сохранить оба файла и квитанцию в закрытую папку на этом устройстве.",
+    ))
+
+
 class HostBackupDialog:
     def __init__(self, root, theme, options, on_closed, *, approved_manifest_sha256: str | None):
         self.root, self.theme, self.options, self.on_closed = root, theme, options, on_closed
@@ -76,6 +88,10 @@ class HostBackupDialog:
         self.verified: HostArchive | None = None
         self.request_id: str | None = None
         self.operation: HostBackupOperation | None = None
+        self.portable_mode = False
+        self.portable_available = False
+        self.portable_pair: HostPortablePair | None = None
+        self.exported_path: Path | None = None
         self._next_poll = 0.0
         self.busy = self.closed = False
         self.status = tk.StringVar(value=(
@@ -85,8 +101,8 @@ class HostBackupDialog:
         self.window = tk.Toplevel(root)
         self.window.title("Полные копии сервера · SovaGrid Connect")
         self.window.transient(root)
-        self.window.geometry("800x630")
-        self.window.minsize(650, 500)
+        self.window.geometry("800x660")
+        self.window.minsize(650, 540)
         self.window.columnconfigure(0, weight=1)
         self.window.rowconfigure(0, weight=1)
         theme.style_window(self.window)
@@ -103,7 +119,7 @@ class HostBackupDialog:
             row=1, column=0, sticky="w", pady=(5, 0))
         ttk.Label(body, text=(
             "Полная копия включает данные Hub, сертификаты Web, настройки Agent и VPN, "
-            "а также конфигурацию SovaGrid. Она содержит секреты и хранится только в закрытом "
+            "а также конфигурацию SovaGrid. Она содержит секреты; оригинал хранится в закрытом "
             "каталоге сервера. Сервер временно остановит только свои записывающие службы и "
             "контейнеры, создаст архив и запустит прежние компоненты."
         ), wraplength=710).grid(row=2, column=0, sticky="w", pady=(9, 8))
@@ -149,11 +165,23 @@ class HostBackupDialog:
         self.history_button = ttk.Button(operation_actions, text="История заданий",
                                          command=self.operation_history)
         self.history_button.pack(side="left", padx=(8, 0))
+        portable_actions = ttk.Frame(body)
+        portable_actions.grid(row=8, column=0, sticky="ew", pady=(8, 0))
+        self.portable_button = ttk.Button(portable_actions, text="Создать переносимую копию…",
+                                          command=self.create_portable)
+        self.portable_button.pack(side="left")
+        self.portable_verify_button = ttk.Button(portable_actions, text="Проверить архив и образы",
+                                                 command=self.verify_portable)
+        self.portable_verify_button.pack(side="left", padx=(8, 0))
+        self.portable_export_button = ttk.Button(portable_actions, text="Сохранить на этом устройстве…",
+                                                 command=self.export_portable)
+        self.portable_export_button.pack(side="left", padx=(8, 0))
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         try:
             saved = self._controller().saved_request()
             if saved is not None:
                 self.request_id = saved.request_id
+                self.portable_mode = saved.mode == "portable"
                 self.status.set("Найден сохранённый запрос. Проверяем состояние на сервере…")
         except InstallError as exc:
             self.status.set(str(exc))
@@ -182,6 +210,15 @@ class HostBackupDialog:
             self.operation is not None and self.operation.terminal)
         self.create_button.configure(state="normal" if ready and self.state and
                                      previous_done else "disabled")
+        self.portable_button.configure(state="normal" if ready and self.state and
+                                       self.portable_available and
+                                       previous_done else "disabled")
+        portable_complete = (ready and self.portable_available and self.portable_mode and
+                             self.operation is not None and
+                             self.operation.phase == "complete")
+        self.portable_verify_button.configure(state="normal" if portable_complete else "disabled")
+        self.portable_export_button.configure(state="normal" if portable_complete and
+                                              self.portable_pair is not None else "disabled")
         self.verify_button.configure(state="normal" if ready and self.state and
                                      self.list.selection() else "disabled")
         self.status_button.configure(state="normal" if ready and self.request_id else "disabled")
@@ -231,9 +268,13 @@ class HostBackupDialog:
         if self.busy or self.approved_manifest_sha256 is None:
             return
         self.state = self.verified = None
+        self.portable_available = False
         self._show("")
         self.status.set("Сверяем установленный серверный пакет и список копий…")
-        self._run("refreshed", self._controller().inspect)
+        def inspect():
+            controller = self._controller()
+            return controller.inspect(), controller.portable_available()
+        self._run("refreshed", inspect)
 
     def verify(self) -> None:
         if self.busy or self.state is None or not self.list.selection():
@@ -269,8 +310,75 @@ class HostBackupDialog:
             return
         request_id = uuid.uuid4().hex
         self.request_id, self.operation = request_id, None
+        self.portable_mode, self.portable_pair, self.exported_path = False, None, None
         self.status.set("Запрос сохранится до остановки служб. Ждём подтверждения сервера…")
         self._run("started", lambda: self._controller().start_online(reviewed, request_id))
+
+    def create_portable(self) -> None:
+        if (self.busy or self.state is None or not self.portable_available or
+                self.request_id is not None and
+                (self.operation is None or not self.operation.terminal)):
+            return
+        reviewed = self.state
+        stopped = ", ".join(reviewed.plan.active_units) or "нет"
+        containers = ", ".join(reviewed.plan.running_containers) or "нет"
+        if not messagebox.askyesno("Создать переносимую копию?", (
+                f"Сервер: {self.options.user}@{self.options.host}:{self.options.port}\n"
+                f"Службы на время копии: {stopped}\n"
+                f"Контейнеры на время копии: {containers}\n\n"
+                "Сервер сохранит закрытый архив и точные образы Docker для переноса. "
+                "Копия может содержать пароли, ключи VPN и сертификаты. Доступ к Hub/Web "
+                "может временно прерваться; прежние службы затем запустятся. "
+                "После создания вы сможете проверить и сохранить пару файлов на этом устройстве. "
+                "Начать?"
+        ), parent=self.window):
+            return
+        if (self.busy or self.state is not reviewed or not self.portable_available or
+                self.request_id is not None and
+                (self.operation is None or not self.operation.terminal)):
+            return
+        request_id = uuid.uuid4().hex
+        self.request_id, self.operation = request_id, None
+        self.portable_mode, self.portable_pair, self.exported_path = True, None, None
+        self.status.set("Запрос переносимой копии сохранится перед остановкой служб…")
+        self._run("portable_started", lambda: self._controller().start_portable(reviewed, request_id))
+
+    def verify_portable(self) -> None:
+        if (self.busy or not self.portable_available or not self.portable_mode or
+                self.operation is None or
+                self.operation.phase != "complete" or not self.request_id):
+            return
+        identity = self.request_id
+        self.portable_pair = None
+        self.exported_path = None
+        self.status.set("Проверяем закрытый архив, образы Docker и их общую квитанцию…")
+        self._run("portable_verified", lambda: self._controller().verify_portable(identity))
+
+    def export_portable(self) -> None:
+        pair = self.portable_pair
+        if (self.busy or pair is None or not self.portable_available or
+                not self.portable_mode or
+                self.request_id != pair.operation.request_id or
+                self.operation is None or self.operation.phase != "complete"):
+            return
+        selected = filedialog.askdirectory(
+            parent=self.window, title="Выберите папку для переносимой копии")
+        if not selected:
+            return
+        destination = Path(selected)
+        if not messagebox.askyesno("Сохранить переносимую копию?", (
+                f"Папка: {destination}\n\n"
+                "Приложение создаст внутри неё отдельную закрытую папку с архивом, "
+                "образами Docker и квитанцией. Эти файлы содержат секреты сервера. "
+                "Сохранить проверенную копию?"
+        ), parent=self.window):
+            return
+        if (self.busy or self.portable_pair is not pair or
+                self.request_id != pair.operation.request_id):
+            return
+        self.status.set("Передаём архив и образы через подтверждённый SSH-маршрут…")
+        self._run("portable_exported", lambda: self._controller().export_portable(
+            pair.operation.request_id, destination))
 
     def check_operation(self) -> None:
         if self.busy or not self.request_id:
@@ -329,8 +437,18 @@ class HostBackupDialog:
             selected = tree.selection()
             if not selected:
                 return
+            try:
+                saved = self._controller().saved_request()
+            except InstallError as exc:
+                self.status.set(str(exc))
+                messagebox.showerror("Полные копии сервера", str(exc), parent=window)
+                return
             self.request_id = selected[0]
             self.operation = None
+            self.portable_mode = (saved is not None and saved.request_id == self.request_id and
+                                  saved.mode == "portable")
+            self.portable_pair = None
+            self.exported_path = None
             window.destroy()
             self.check_operation()
         ttk.Button(actions, text="Проверить выбранное", command=select).pack(side="left")
@@ -338,11 +456,22 @@ class HostBackupDialog:
         self.status.set(f"Заданий в истории: {len(operations)}.")
 
     def _render_operation(self, operation: HostBackupOperation) -> None:
+        if self.request_id != operation.request_id:
+            self.portable_mode = False
+        if self.operation != operation:
+            self.portable_pair = None
         self.request_id, self.operation = operation.request_id, operation
         self._show(_operation_text(operation) +
                    ("\n\n" + _plan_text(self.state.plan) if self.state else ""))
         if operation.phase == "complete":
-            self.status.set("Копия создана. Обновите список и проверьте архив.")
+            if self.portable_mode and self.exported_path is not None:
+                self.status.set("Переносимая копия сохранена: " + str(self.exported_path))
+            elif self.portable_mode and self.portable_pair is not None:
+                self.status.set("Архив и образы проверены. Можно сохранить их на устройстве.")
+            elif self.portable_mode:
+                self.status.set("Переносимая копия создана. Проверьте архив и образы.")
+            else:
+                self.status.set("Копия создана. Обновите список и проверьте архив.")
         elif operation.phase == "recovered":
             self.status.set("Службы восстановлены после сбоя. Проверьте состояние сервера.")
         elif operation.phase == "failed":
@@ -366,7 +495,8 @@ class HostBackupDialog:
                 continue
             self.busy = False
             if event == "refreshed":
-                self._render_state(payload)
+                state, self.portable_available = payload
+                self._render_state(state)
             elif event == "verified":
                 self.verified = payload
                 self._show(_archive_text(payload))
@@ -379,16 +509,30 @@ class HostBackupDialog:
                 self.verified = archive
                 self._show(_archive_text(archive))
                 self.status.set("Полная копия создана и проверена на сервере.")
-            elif event in ("started", "operation", "recovered"):
-                self._render_operation(payload)
+            elif event in ("started", "operation", "recovered", "portable_started"):
+                if event == "operation" and self.portable_mode:
+                    # The saved portable request was validated by the pinned
+                    # portable-status source proof, including after app restart.
+                    self.portable_available = True
+                self._render_operation(payload.operation if isinstance(payload, HostPortableOperation)
+                                       else payload)
+            elif event == "portable_verified":
+                self.portable_pair = payload
+                self._show(_portable_text(payload))
+                self.status.set("Архив, образы и квитанция проверены. Теперь можно сохранить их на устройстве.")
+            elif event == "portable_exported":
+                self.exported_path = payload
+                self.status.set("Переносимая копия сохранена: " + str(payload))
+                self._show("Проверенная переносимая копия сохранена в закрытой папке:\n" + str(payload))
             elif event == "history":
                 self._show_history(payload)
             elif event == "error":
                 kind, error = payload
-                if kind not in ("started", "operation", "recovered", "history"):
+                if kind not in ("started", "operation", "recovered", "history",
+                                "portable_started", "portable_verified", "portable_exported"):
                     self.state = self.verified = None
                     self._show("")
-                if kind == "started":
+                if kind in ("started", "portable_started"):
                     try:
                         saved = self._controller().saved_request()
                         if saved is None or saved.request_id != self.request_id:
@@ -401,7 +545,8 @@ class HostBackupDialog:
                     self._next_poll = time.monotonic() + 5.0
                 message = str(error) if isinstance(error, InstallError) else (
                     "Сервер не подтвердил результат. Проверьте сохранённый запрос перед повтором.")
-                if kind in ("started", "operation", "recovered") and self.request_id:
+                if kind in ("started", "portable_started", "operation", "recovered",
+                            "portable_verified", "portable_exported") and self.request_id:
                     message += "\nЗапрос: " + self.request_id
                 self.status.set(message)
                 messagebox.showerror("Полные копии сервера", message, parent=self.window)
