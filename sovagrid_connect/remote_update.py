@@ -149,12 +149,12 @@ def fail(code):
     emit('SG_UPDATE_REFUSE:' + code)
     raise UpdateFailure(code)
 
-def command(args, *, timeout=120, check=True, env=None, stdout=None):
+def command(args, *, timeout=120, check=True, env=None, stdout=None, pass_fds=()):
     global ACTIVE_CHILD
     try:
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stdout or subprocess.DEVNULL,
                                    stderr=subprocess.STDOUT if stdout is not None else subprocess.DEVNULL,
-                                   env=env, start_new_session=True)
+                                   env=env, start_new_session=True, pass_fds=pass_fds)
         ACTIVE_CHILD = process
         try:
             code = process.wait(timeout=timeout)
@@ -1464,7 +1464,43 @@ def automatic_idle():
     if busy:
         fail('BUSY')
 
+@contextlib.contextmanager
+def installation_lock():
+    """Serialize source switch, install and rollback with clean-host restore."""
+    import fcntl
+    target = path('/run/sovagrid-installation.lock')
+    descriptor = os.open(target, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        validate_lock(info)
+        if info.st_nlink != 1:
+            fail('STATE')
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fail('BUSY')
+        observed = target.lstat()
+        if (observed.st_dev, observed.st_ino) != (info.st_dev, info.st_ino):
+            fail('STATE')
+        fence = path('/var/lib/.sovagrid-host-restore-in-progress')
+        if fence.exists() or fence.is_symlink():
+            fail('RESTORE_RECOVERY')
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
 def apply(candidate_digest, expected_manifest, *, automatic=False):
+    refuse_unsnapshotted_services()
+    if not re.fullmatch(r'[0-9a-f]{64}', expected_manifest):
+        fail('VERSION')
+    if automatic:
+        fail('UPDATER_CONTRACT')
+    with installation_lock() as installation_descriptor:
+        return _apply_locked(candidate_digest, expected_manifest, automatic=automatic,
+                             installation_descriptor=installation_descriptor)
+
+
+def _apply_locked(candidate_digest, expected_manifest, *, automatic=False, installation_descriptor):
     import fcntl
     refuse_unsnapshotted_services()
     # The embedded Connect worker does not hold Blueprint's Hub writer and
@@ -1586,6 +1622,7 @@ def apply(candidate_digest, expected_manifest, *, automatic=False):
                 # The supervisor holds the same lock throughout source switch,
                 # installation and rollback; a nested run.sh must not deadlock.
                 install_env['SOVAGRID_PUBLIC_WEB_LOCK_HELD'] = '1'
+                install_env['SOVAGRID_INSTALLATION_LOCK_FD'] = str(installation_descriptor)
                 # This updater snapshots both auto-update unit files and
                 # restores the timer state. New run.sh versions refuse an
                 # updater-managed upgrade without this rollback contract.
@@ -1594,7 +1631,8 @@ def apply(candidate_digest, expected_manifest, *, automatic=False):
                 install_env['SOVAGRID_HUB_BACKUP_BROKER_SNAPSHOT'] = '1'
                 install_env['SOVAGRID_SSH_GATEWAY_SNAPSHOT'] = '1'
                 install_env['SOVAGRID_WEB_AGENT_SNAPSHOT'] = '1'
-                command(['bash', str(source / 'sovagrid-blueprint/run.sh'), *flags], timeout=2700, stdout=output, env=install_env)
+                command(['bash', str(source / 'sovagrid-blueprint/run.sh'), *flags], timeout=2700,
+                        stdout=output, env=install_env, pass_fds=(installation_descriptor,))
             refresh_service_units(folder / 'source-before', source, unit_states)
             emit('SG_APPLY_STAGE:CHECKING')
             health(source, expected_units)

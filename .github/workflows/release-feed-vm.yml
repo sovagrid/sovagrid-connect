@@ -4,15 +4,8 @@
 name: Connect signed-feed read-only review on disposable Ubuntu VM
 
 # No production signing key, feed opt-in, or persistent server is touched.
+# Expensive disposable-VM checks are selected explicitly for a combined release.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'sovagrid_connect/release_feed.py'
-      - 'sovagrid_connect/release_feed_remote.py'
-      - 'sovagrid_connect/release_feed_dialog.py'
-      - 'tests/release_feed_vm_client.py'
-      - '.github/workflows/release-feed-vm.yml'
   workflow_dispatch:
 
 permissions:

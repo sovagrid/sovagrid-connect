@@ -140,6 +140,7 @@ _REFUSALS = {
     "SG_UPDATE_REFUSE:HASH": "SHA-256 подготовленного пакета не совпал; обновление не началось.",
     "SG_UPDATE_REFUSE:HOST": "Обновление поддерживается только для Ubuntu с входом root.",
     "SG_UPDATE_REFUSE:ACTIVE": "Активная установка не имеет проверенного манифеста или признаков управления run.sh.",
+    "SG_UPDATE_REFUSE:RESTORE_RECOVERY": "На сервере не завершено восстановление SovaGrid. Сначала продолжите или отмените его, затем повторите обновление.",
     "SG_UPDATE_REFUSE:STATE": "Состояние функций или резервной копии неоднозначно; обновление остановлено.",
     "SG_UPDATE_REFUSE:BUSY": "На сервере есть активные сеансы или незавершённые действия; автоматическое обновление отложено.",
     "SG_UPDATE_REFUSE:SPACE": "Недостаточно свободного места для резервной копии и сборки новых образов.",
@@ -381,6 +382,16 @@ _INSTALL_SCRIPT = _CHECKS + r'''
 command -v flock >/dev/null 2>&1 || { printf 'SG_INSTALL_REFUSE:UNKNOWN\n'; exit 22; }
 exec 9>/run/sovagrid-first-install.lock
 flock -n 9 || { printf 'SG_INSTALL_REFUSE:EXISTING\n'; exit 22; }
+installation_lock=/run/sovagrid-installation.lock
+[[ ! -L $installation_lock ]] || { printf 'SG_INSTALL_REFUSE:UNKNOWN\n'; exit 22; }
+if [[ ! -e $installation_lock ]]; then
+  ( set -o noclobber; : > "$installation_lock" ) 2>/dev/null || { printf 'SG_INSTALL_REFUSE:UNKNOWN\n'; exit 22; }
+fi
+[[ -f $installation_lock && $(stat -c '%u:%g:%a:%h' "$installation_lock") == 0:0:600:1 ]] || { printf 'SG_INSTALL_REFUSE:UNKNOWN\n'; exit 22; }
+exec 6>>"$installation_lock"
+[[ $(stat -Lc '%d:%i' /proc/self/fd/6) == "$(stat -c '%d:%i' "$installation_lock")" ]] || { printf 'SG_INSTALL_REFUSE:UNKNOWN\n'; exit 22; }
+flock -n 6 || { printf 'SG_INSTALL_REFUSE:EXISTING\n'; exit 22; }
+[[ ! -e /var/lib/.sovagrid-host-restore-in-progress && ! -L /var/lib/.sovagrid-host-restore-in-progress ]] || { printf 'SG_INSTALL_REFUSE:EXISTING\n'; exit 22; }
 archive=$(mktemp /opt/.sovagrid-bundle.XXXXXXXX)
 stage=$(mktemp -d /opt/.sovagrid-stage.XXXXXXXX)
 cleanup() { rm -f -- "$archive"; if [[ -d $stage ]]; then rm -rf -- "$stage"; fi; }
@@ -415,7 +426,7 @@ fi
 ''' + _CHECKS + r'''
 mv -T -- "$stage" /opt/sovagrid-src
 printf 'SG_INSTALL_STAGE:RUN\n'
-bash /opt/sovagrid-src/sovagrid-blueprint/run.sh "$@" 2>&1 | while IFS= read -r line; do
+SOVAGRID_INSTALLATION_LOCK_FD=6 bash /opt/sovagrid-src/sovagrid-blueprint/run.sh "$@" 2>&1 | while IFS= read -r line; do
   case "$line" in
     'SovaGrid: installing Docker from Ubuntu packages') printf 'SG_INSTALL_STAGE:DOCKER\n' ;;
     'SovaGrid: installing the Docker Compose plugin') printf 'SG_INSTALL_STAGE:COMPOSE\n' ;;

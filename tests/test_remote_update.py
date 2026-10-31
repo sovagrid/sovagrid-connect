@@ -642,6 +642,7 @@ class RemoteUpdateTests(unittest.TestCase):
     def _transaction_fixture(self, root: Path, *, fail_install: bool) -> tuple[dict, list[list[str]]]:
         code = updater()
         code["ROOT"] = root
+        (root / "run").mkdir(exist_ok=True)
         code["SNAPSHOT"] = ("/etc/sovagrid", "/var/lib/sovagrid/hub",
                             "/etc/systemd/system/sovagrid-vpn-status.service")
         code["UNITS"] = ("sovagrid-agent.service", "sovagrid-vpn-routing.service")

@@ -2,26 +2,35 @@ name: Connect CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: Test all supported desktop OS and Python versions
+        type: boolean
+        default: false
+      build_bundles:
+        description: Build the three desktop distribution archives
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+concurrency:
+  group: connect-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
-        python-version: ['3.9', '3.13']
-        include:
-          - os: ubuntu-24.04
-            python-version: '3.9'
-          - os: ubuntu-26.04
-            python-version: '3.13'
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.full_matrix && '[{"os":"windows-latest","python-version":"3.9"},{"os":"windows-latest","python-version":"3.13"},{"os":"macos-latest","python-version":"3.9"},{"os":"macos-latest","python-version":"3.13"},{"os":"ubuntu-24.04","python-version":"3.9"},{"os":"ubuntu-26.04","python-version":"3.13"}]' || '[{"os":"ubuntu-24.04","python-version":"3.13"}]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -49,7 +58,9 @@ jobs:
 
   bundle:
     name: Bundle / ${{ matrix.os }}
+    if: github.event_name == 'workflow_dispatch' && inputs.build_bundles
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

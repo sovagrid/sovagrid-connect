@@ -5,24 +5,8 @@ name: Connect Agent-only promotion on disposable Ubuntu VM
 
 # Root operations run only for reviewed main commits or maintainer dispatch.
 # Fork pull requests execute the ordinary non-root Connect CI instead.
+# Expensive disposable-VM checks are selected explicitly for a combined release.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'sovagrid_connect/promotion.py'
-      - 'sovagrid_connect/promotion_protocol.py'
-      - 'sovagrid_connect/promotion_remote.py'
-      - 'sovagrid_connect/promotion_dialog.py'
-      - 'sovagrid_connect/local_operations.py'
-      - 'sovagrid_connect/local_operations_dialog.py'
-      - 'sovagrid_connect/local_commands.py'
-      - 'sovagrid_connect/local_commands_remote.py'
-      - 'sovagrid_connect/local_commands_dialog.py'
-      - 'tests/test_promotion.py'
-      - 'tests/promotion_vm_client.py'
-      - 'tests/local_operations_vm_client.py'
-      - 'tests/local_commands_vm_client.py'
-      - '.github/workflows/promotion-vm.yml'
   workflow_dispatch:
 
 permissions:
