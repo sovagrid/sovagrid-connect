@@ -20,7 +20,7 @@ from contextlib import nullcontext
 from .core import ConnectionOptions, Tunnel
 from .installer import (InstallError, InstallFeatures, PreparedUpdate, ServerInstaller,
                         UpdatePreview, nearby_server_bundle, parse_journal_units)
-from .server_bundle_download import (PUBLISHED_SERVER_SOURCE_SHA256, cached_published_server_bundle,
+from .server_bundle_download import (PUBLISHED_SERVER_VERSION, PUBLISHED_SERVER_SOURCE_SHA256, cached_published_server_bundle,
                                      downloaded_server_bundle)
 from .ssh_profiles import OpenSSHProfiles, ProfileImportError
 from .theme import CHOICES, LABELS, ThemeManager
@@ -1137,7 +1137,7 @@ class Launcher:
         def show_source() -> None:
             if source_mode.get() == "release":
                 displayed_bundle.set("Автоматически с GitHub")
-                bundle_info.set("Серверный выпуск 0.12.0: скачивание, проверка SHA-256 и структуры до SSH-передачи.")
+                bundle_info.set(f"Серверный выпуск {PUBLISHED_SERVER_VERSION}: скачивание, проверка SHA-256 и структуры до SSH-передачи.")
             elif bundle.get() and pinned_nearby and Path(bundle.get()).resolve() == suggested[0].resolve():
                 displayed_bundle.set(bundle.get())
                 bundle_info.set("Проверенный пакет рядом с приложением · SHA-256 закреплён в Connect")
@@ -1501,7 +1501,7 @@ class Launcher:
 
         def show_source() -> None:
             if source_mode.get() == "release":
-                displayed_bundle.set("Скачать проверенный выпуск 0.12.0 с GitHub")
+                displayed_bundle.set(f"Скачать проверенный выпуск {PUBLISHED_SERVER_VERSION} с GitHub")
                 detail.set("Connect сохранит пакет в закрытом каталоге и сверит закреплённый SHA-256 перед SSH-передачей.")
             elif bundle.get() and pinned_nearby and Path(bundle.get()).resolve() == suggested[0]:
                 displayed_bundle.set(bundle.get())
