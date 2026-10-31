@@ -36,12 +36,10 @@ def updater() -> dict:
 
 @unittest.skipIf(os.name == "nt", "remote transaction fixtures require Ubuntu/POSIX filesystem semantics")
 class RemoteUpdateTests(unittest.TestCase):
-    def test_unsnapshotted_web_agent_refused_before_preview_or_apply(self) -> None:
+    def test_unsnapshotted_external_agent_writer_refused_before_preview_or_apply(self) -> None:
         for footprint in (
-                'var/lib/sovagrid/.web-agent-installer-managed-by-run-sh',
-                'var/lib/sovagrid/web-agent',
-                'etc/systemd/system/sovagrid-web-agent-control.socket',
                 'etc/sovagrid/.external-agent-apply-managed-by-run-sh',
+                'etc/systemd/system/sovagrid-external-agent-apply@.service',
                 'var/lib/sovagrid/external-agent-operations'):
             with self.subTest(footprint=footprint), tempfile.TemporaryDirectory() as directory:
                 code = updater()
@@ -56,6 +54,108 @@ class RemoteUpdateTests(unittest.TestCase):
                     with self.assertRaisesRegex(code['UpdateFailure'], 'UPDATER_CONTRACT'):
                         operation()
                 self.assertFalse((root / 'opt/sovagrid-candidates').exists())
+
+    def test_web_agent_state_requires_owned_marker_journal_and_units(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = updater()
+            code['ROOT'], code['PUBLIC_OWNER'] = root, os.getuid()
+            marker = root / code['WEB_AGENT_MARKER'].lstrip('/')
+            private = root / code['WEB_AGENT_DIR'].lstrip('/')
+            journal = root / code['WEB_AGENT_JOURNAL'].lstrip('/')
+            marker.parent.mkdir(parents=True)
+            marker.write_bytes(code['WEB_AGENT_MARKER_CONTENT'])
+            marker.chmod(0o600)
+            journal.mkdir(parents=True)
+            private.chmod(0o700)
+            journal.chmod(0o700)
+            units = [root / 'etc/systemd/system' / unit for unit in code['WEB_AGENT_UNITS']]
+            for unit in units:
+                unit.parent.mkdir(parents=True, exist_ok=True)
+                unit.write_text('[Unit]\nDescription=fixture\n')
+                unit.chmod(0o644)
+            original_lstat = Path.lstat
+
+            def root_group(item):
+                info = original_lstat(item)
+                if item.is_relative_to(root):
+                    return types.SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid,
+                                                 st_gid=0, st_nlink=info.st_nlink,
+                                                 st_size=info.st_size)
+                return info
+
+            with patch.object(Path, 'lstat', root_group):
+                self.assertTrue(code['web_agent_managed']())
+                units[0].unlink()
+                with self.assertRaises(code['UpdateFailure']):
+                    code['web_agent_managed']()
+                units[0].write_text('[Unit]\nDescription=fixture\n')
+                marker.unlink()
+                with self.assertRaises(code['UpdateFailure']):
+                    code['web_agent_managed']()  # Orphaned private journal is not ignored.
+
+    def test_web_agent_candidate_must_preserve_installer_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = updater()
+            code['ROOT'] = root
+            code['web_agent_managed'] = lambda: True
+            code['backup_broker_enabled'] = lambda: False
+            code['ssh_gateway_managed'] = lambda: False
+            source = root / 'candidate'
+            script = source / 'sovagrid-blueprint/run.sh'
+            script.parent.mkdir(parents=True)
+            script.write_text('#!/bin/bash\n')
+            with self.assertRaises(code['UpdateFailure']):
+                code['candidate_features_compatible'](source, [])
+            script.write_text('#!/bin/bash\n# SOVAGRID_WEB_AGENT_INSTALL_V1\n')
+            for name in ('compose.web-agent.yaml', 'web_agent_bundle.py',
+                         'web_agent_jobs.py', 'web_agent_service.py',
+                         'web_wireguard_control.py', 'web_amnezia_provision.py',
+                         *code['WEB_AGENT_UNITS']):
+                target = source / 'sovagrid-blueprint/deploy' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fixture\n')
+            for name in ('deploy/sovagrid-amnezia-provision',
+                         'sovagrid_vpn/amnezia_provision.py'):
+                target = source / 'sovagrid-vpn' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fixture\n')
+            code['candidate_features_compatible'](source, [])
+            args, _ = code['compose_args'](source)
+            self.assertIn(str(source / 'sovagrid-blueprint/deploy/compose.web-agent.yaml'), args)
+            (source / 'sovagrid-blueprint/deploy/web_agent_jobs.py').unlink()
+            with self.assertRaises(code['UpdateFailure']):
+                code['candidate_features_compatible'](source, [])
+
+    def test_web_agent_journal_lock_blocks_a_parallel_mutation(self) -> None:
+        import fcntl
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = updater()
+            code['ROOT'] = root
+            code['web_agent_managed'] = lambda: True
+            code['public_path'] = lambda *_args, **_kwargs: None
+            code['validate_lock'] = lambda _info: None
+            journal = root / code['WEB_AGENT_JOURNAL'].lstrip('/')
+            journal.parent.mkdir(parents=True)
+            original_lstat = Path.lstat
+
+            def owned_journal(item):
+                info = original_lstat(item)
+                if item == journal:
+                    return types.SimpleNamespace(st_mode=info.st_mode, st_gid=0)
+                return info
+
+            with patch.object(Path, 'lstat', owned_journal), patch.object(
+                    os, 'fstat', return_value=types.SimpleNamespace(st_gid=0, st_nlink=1)):
+                with code['web_agent_snapshot_lock']():
+                    with (journal / '.enrollment-web-mutation').open('rb') as contender:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with (journal / '.enrollment-web-mutation').open('rb') as contender:
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(contender, fcntl.LOCK_UN)
 
     def test_socket_activated_services_need_listening_sockets_not_idle_workers(self) -> None:
         code = updater()
@@ -112,12 +212,19 @@ class RemoteUpdateTests(unittest.TestCase):
             '/var/lib/sovagrid/backups/.broker-requests',
             '/etc/systemd/system/sovagrid-hub-backup-control.socket',
             '/etc/systemd/system/sovagrid-hub-backup-control.service'))
-        self.assertEqual(code['SNAPSHOT'][:-1], code['HUB_BACKUP_SNAPSHOT'])
-        self.assertEqual(code['SNAPSHOT'][-1], code['SSH_GATEWAY_MARKER'])
+        self.assertEqual(code['SSH_GATEWAY_SNAPSHOT'][:-1], code['HUB_BACKUP_SNAPSHOT'])
+        self.assertEqual(code['SSH_GATEWAY_SNAPSHOT'][-1], code['SSH_GATEWAY_MARKER'])
+        self.assertEqual(code['SNAPSHOT'][:len(code['SSH_GATEWAY_SNAPSHOT'])],
+                         code['SSH_GATEWAY_SNAPSHOT'])
+        self.assertEqual(code['SNAPSHOT'][-4:], (
+            code['WEB_AGENT_MARKER'], code['WEB_AGENT_DIR'],
+            '/etc/systemd/system/sovagrid-web-agent-control.socket',
+            '/etc/systemd/system/sovagrid-web-agent-control.service'))
         self.assertEqual(code['HUB_BACKUP_SNAPSHOT'][:len(code['ROUTING_SNAPSHOT'])],
                          code['ROUTING_SNAPSHOT'])
         self.assertEqual(code['ROUTING_ALL_UNITS'][-1], 'sovagrid-vpn-routing.service')
-        self.assertEqual(code['UNITS'][-2:], code['BACKUP_BROKER_UNITS'])
+        self.assertEqual(code['SSH_GATEWAY_UNITS'][-2:], code['BACKUP_BROKER_UNITS'])
+        self.assertEqual(code['UNITS'][-2:], code['WEB_AGENT_UNITS'])
         self.assertNotIn('sovagrid-service-control.service', code['LEGACY_UNITS'])
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
@@ -146,6 +253,9 @@ class RemoteUpdateTests(unittest.TestCase):
                 code['HUB_BACKUP_SNAPSHOT'])
             self.assertIs(code['rollback_layout'](folder, {
                 'phase': 'running', 'snapshot_layout': 'ssh_gateway_v1'})[0],
+                code['SSH_GATEWAY_SNAPSHOT'])
+            self.assertIs(code['rollback_layout'](folder, {
+                'phase': 'running', 'snapshot_layout': 'web_agent_v1'})[0],
                 code['SNAPSHOT'])
             with self.assertRaises(code['UpdateFailure']):
                 code['rollback_layout'](folder, {'phase': 'running', 'snapshot_layout': 'future'})
@@ -262,19 +372,13 @@ class RemoteUpdateTests(unittest.TestCase):
             with self.assertRaises(code["UpdateFailure"]):
                 code["automatic_idle"]()  # Unknown/old schema fails closed.
 
-    def test_automatic_busy_gate_refuses_before_service_stop(self) -> None:
+    def test_automatic_apply_refuses_until_writer_and_agent_barriers_are_ported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             code, calls = self._transaction_fixture(root, fail_install=False)
-            seen = []
-            def idle():
-                seen.append(True)
-                if len(seen) == 3:
-                    raise code["UpdateFailure"]("busy")
-            code["automatic_idle"] = idle
-            with self.assertRaises(code["UpdateFailure"]):
+            with self.assertRaisesRegex(code["UpdateFailure"], "UPDATER_CONTRACT"):
                 code["apply"]("a" * 64, "b" * 64, automatic=True)
-            self.assertEqual(len(seen), 3)
+            self.assertEqual(calls, [])
             self.assertFalse(any(args[:3] == ["docker", "compose", "stop"] for args in calls))
             self.assertEqual((root / "opt/sovagrid-src/version").read_text(), "old")
             self.assertEqual((root / "var/lib/sovagrid/hub/hub.sqlite").read_text(), "old data")
@@ -584,6 +688,7 @@ class RemoteUpdateTests(unittest.TestCase):
         code["original_compose_args"] = code["compose_args"]
         code["compose_args"] = lambda _source, **_kwargs: (["docker", "compose"], {})
         code["health"] = lambda _source, _units: None
+        code["wait_recreated_container_health"] = lambda _images: None
 
         def copy_item(source: Path, destination: Path) -> None:
             if source.is_dir():
@@ -1053,6 +1158,52 @@ class RemoteUpdateTests(unittest.TestCase):
             self.assertTrue(any(args[-3:] == ["up", "-d", "--no-build"] or
                                 "--force-recreate" in args for args in calls))
 
+    def test_web_agent_journal_units_and_marker_roll_back_with_failed_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            code, calls = self._transaction_fixture(root, fail_install=True)
+            complete = updater()
+            code['SNAPSHOT'], code['UNITS'] = complete['SNAPSHOT'], complete['UNITS']
+            code['web_agent_managed'] = lambda: True
+            code['web_agent_socket_ready'] = lambda: None
+            code['web_agent_snapshot_lock'] = lambda: nullcontext()
+            marker = root / code['WEB_AGENT_MARKER'].lstrip('/')
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_bytes(code['WEB_AGENT_MARKER_CONTENT'])
+            journal = root / code['WEB_AGENT_JOURNAL'].lstrip('/')
+            journal.mkdir(parents=True)
+            state = journal / 'existing-job.json'
+            state.write_text('{"phase":"complete"}\n')
+            unit = root / 'etc/systemd/system' / code['WEB_AGENT_UNITS'][0]
+            unit.parent.mkdir(parents=True, exist_ok=True)
+            unit.write_text('original socket unit\n')
+            service = root / 'etc/systemd/system' / code['WEB_AGENT_UNITS'][1]
+            service.write_text('original service unit\n')
+            original_command = code['command']
+
+            def command(args, **kwargs):
+                if args[0] == 'bash':
+                    self.assertEqual(kwargs['env']['SOVAGRID_WEB_AGENT_SNAPSHOT'], '1')
+                    transaction = next((root / 'opt/sovagrid-candidates/transactions').iterdir())
+                    record = json.loads((transaction / 'state.json').read_text())
+                    self.assertEqual(record['snapshot_layout'], 'web_agent_v1')
+                    marker.write_text('changed marker\n')
+                    state.write_text('{"phase":"corrupt"}\n')
+                    unit.write_text('changed socket unit\n')
+                    service.unlink()
+                return original_command(args, **kwargs)
+
+            code['command'] = command
+            with self.assertRaises(code['UpdateFailure']):
+                code['apply']('a' * 64, 'b' * 64)
+            self.assertEqual(marker.read_bytes(), code['WEB_AGENT_MARKER_CONTENT'])
+            self.assertEqual(state.read_text(), '{"phase":"complete"}\n')
+            self.assertEqual(unit.read_text(), 'original socket unit\n')
+            self.assertEqual(service.read_text(), 'original service unit\n')
+            self.assertIn(['systemctl', 'stop', *reversed(code['WEB_AGENT_UNITS'])], calls)
+            self.assertIn(['systemctl', 'start', code['WEB_AGENT_UNITS'][0]], calls)
+            self.assertFalse(any((root / 'opt/sovagrid-candidates/transactions').iterdir()))
+
     def test_container_marker_timer_and_snapshot_restore_after_failed_update(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1117,9 +1268,10 @@ class RemoteUpdateTests(unittest.TestCase):
                     self.assertEqual(kwargs['env']['SOVAGRID_RELEASE_FEED_SNAPSHOT'], '1')
                     transaction = next((root / 'opt/sovagrid-candidates/transactions').iterdir())
                     self.assertEqual(json.loads((transaction / 'state.json').read_text())['snapshot_layout'],
-                                     'ssh_gateway_v1')
+                                     'web_agent_v1')
                     self.assertEqual(kwargs['env']['SOVAGRID_HUB_BACKUP_BROKER_SNAPSHOT'], '1')
                     self.assertEqual(kwargs['env']['SOVAGRID_SSH_GATEWAY_SNAPSHOT'], '1')
+                    self.assertEqual(kwargs['env']['SOVAGRID_WEB_AGENT_SNAPSHOT'], '1')
                     (feed_dir / 'release-feed-state.json').write_text('new feed\n')
                     feed_timer.unlink()
                     (policy / 'policy.json').write_text('new policy\n')
