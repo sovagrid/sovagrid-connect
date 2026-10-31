@@ -1,0 +1,108 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Jigokuraku01
+# Additional author attribution terms: see ../../ATTRIBUTION.md.
+name: Connect Web Agent migration on disposable Ubuntu
+
+# This expensive, root-changing test is manual only. It never uses a real host.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-web-agent-bridge-vm
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OLD_ARCHIVE_SHA: 10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9
+      OLD_MANIFEST_SHA: c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286
+      TARGET_ARCHIVE_SHA: c5786bb64467063196046144e665a98e347f40713facb37809b65a03eb70f347
+      TARGET_MANIFEST_SHA: ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Require an empty GitHub-hosted Ubuntu runner
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(cat /proc/1/comm)" = systemd
+          test ! -e /opt/sovagrid-src
+          test ! -e /etc/sovagrid
+          sudo -n install -d -o root -g root -m 0755 /opt
+          test "$(stat -c '%u:%a' /opt)" = 0:755
+          sudo -n systemctl start docker
+          sudo -n docker info >/dev/null
+          sudo -n docker compose version >/dev/null
+      - name: Download two exact public server releases
+        run: |
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 240 \
+            https://github.com/sovagrid/sovagrid-blueprint/releases/download/server-v0.14.0/SovaGrid-server-source.tar.gz \
+            -o "$RUNNER_TEMP/sovagrid-old.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 240 \
+            https://github.com/sovagrid/sovagrid-blueprint/releases/download/server-v0.14.1/SovaGrid-server-source.tar.gz \
+            -o "$RUNNER_TEMP/sovagrid-target.tar.gz"
+          printf '%s  %s\n' "$OLD_ARCHIVE_SHA" "$RUNNER_TEMP/sovagrid-old.tar.gz" | sha256sum --check -
+          printf '%s  %s\n' "$TARGET_ARCHIVE_SHA" "$RUNNER_TEMP/sovagrid-target.tar.gz" | sha256sum --check -
+          test "$(tar -xOzf "$RUNNER_TEMP/sovagrid-old.tar.gz" sovagrid-bundle.json | sha256sum | cut -d ' ' -f1)" = "$OLD_MANIFEST_SHA"
+          test "$(tar -xOzf "$RUNNER_TEMP/sovagrid-target.tar.gz" sovagrid-bundle.json | sha256sum | cut -d ' ' -f1)" = "$TARGET_MANIFEST_SHA"
+      - name: Install the default v0.14.0 full server with managed Web Agent
+        run: |
+          sudo -n install -d -o root -g root -m 0755 /opt/sovagrid-src
+          sudo -n tar -xzf "$RUNNER_TEMP/sovagrid-old.tar.gz" -C /opt/sovagrid-src --no-same-owner
+          sudo -n bash /opt/sovagrid-src/sovagrid-blueprint/run.sh
+          sudo -n test -f /var/lib/sovagrid/.web-agent-installer-managed-by-run-sh
+          sudo -n systemctl is-active --quiet sovagrid-web-agent-control.socket
+          sudo -n systemctl is-active --quiet sovagrid-web-agent-control.service
+      - name: Start a private loopback-only root SSH target with pinned host key
+        run: |
+          if [[ ! -x /usr/sbin/sshd ]]; then
+            sudo -n apt-get update -qq
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server
+          fi
+          sudo -n install -d -o root -g root -m 0755 /run/sshd
+          sudo -n install -d -o root -g root -m 0700 /root/.ssh
+          sudo -n test ! -L /root/.ssh/known_hosts
+          sudo -n ssh-keygen -q -t ed25519 -N '' -f /run/sovagrid-ci-hostkey
+          sudo -n ssh-keygen -q -t ed25519 -N '' -f /run/sovagrid-ci-client
+          sudo -n install -o root -g root -m 0600 /run/sovagrid-ci-client.pub /run/sovagrid-ci-authorized_keys
+          sudo -n ssh-keygen -y -f /run/sovagrid-ci-hostkey | \
+            sed 's/^/[127.0.0.1]:22022 /' | sudo -n tee -a /root/.ssh/known_hosts >/dev/null
+          sudo -n chmod 0600 /root/.ssh/known_hosts
+          cat > "$RUNNER_TEMP/sovagrid-ci-sshd.conf" <<'EOF'
+          Port 22022
+          ListenAddress 127.0.0.1
+          HostKey /run/sovagrid-ci-hostkey
+          PidFile /run/sovagrid-ci-sshd.pid
+          AuthorizedKeysFile /run/sovagrid-ci-authorized_keys
+          PermitRootLogin prohibit-password
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          UsePAM no
+          AllowUsers root
+          EOF
+          sudo -n /usr/sbin/sshd -t -f "$RUNNER_TEMP/sovagrid-ci-sshd.conf"
+          sudo -n /usr/sbin/sshd -f "$RUNNER_TEMP/sovagrid-ci-sshd.conf"
+          sudo -n ssh -i /run/sovagrid-ci-client -p 22022 -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes root@127.0.0.1 true
+      - name: Prove rollback, manual Connect migration and live signed-feed readiness
+        run: |
+          sudo -n -- env HOME=/root PYTHONPATH="$GITHUB_WORKSPACE" \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+            SOVAGRID_BRIDGE_VM_FIXTURE=1 \
+            python3 -B tests/web_agent_bridge_vm.py \
+            "$RUNNER_TEMP/sovagrid-target.tar.gz" "$TARGET_ARCHIVE_SHA" "$RUNNER_TEMP"
+      - name: Remove disposable SSH private keys
+        if: always()
+        run: |
+          sudo -n rm -f /run/sovagrid-ci-client /run/sovagrid-ci-client.pub \
+            /run/sovagrid-ci-hostkey /run/sovagrid-ci-hostkey.pub \
+            /run/sovagrid-ci-authorized_keys
