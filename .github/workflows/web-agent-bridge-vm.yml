@@ -89,8 +89,10 @@ jobs:
           UsePAM no
           AllowUsers root
           EOF
-          sudo -n /usr/sbin/sshd -t -f "$RUNNER_TEMP/sovagrid-ci-sshd.conf"
-          sudo -n /usr/sbin/sshd -f "$RUNNER_TEMP/sovagrid-ci-sshd.conf"
+          sudo -n install -o root -g root -m 0600 "$RUNNER_TEMP/sovagrid-ci-sshd.conf" \
+            /run/sovagrid-ci-sshd.conf
+          sudo -n /usr/sbin/sshd -t -f /run/sovagrid-ci-sshd.conf
+          sudo -n /usr/sbin/sshd -f /run/sovagrid-ci-sshd.conf
           sudo -n ssh -i /run/sovagrid-ci-client -p 22022 -o BatchMode=yes \
             -o StrictHostKeyChecking=yes root@127.0.0.1 true
       - name: Prove rollback, manual Connect migration and live signed-feed readiness
@@ -105,4 +107,4 @@ jobs:
         run: |
           sudo -n rm -f /run/sovagrid-ci-client /run/sovagrid-ci-client.pub \
             /run/sovagrid-ci-hostkey /run/sovagrid-ci-hostkey.pub \
-            /run/sovagrid-ci-authorized_keys
+            /run/sovagrid-ci-authorized_keys /run/sovagrid-ci-sshd.conf
