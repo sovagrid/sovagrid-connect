@@ -618,7 +618,7 @@ class HostBackupTests(unittest.TestCase):
             final.unlink()
             linked_parent = root / "linked"
             linked_parent.symlink_to(selected, target_is_directory=True)
-            with self.assertRaisesRegex(InstallError, "обычным каталогом"):
+            with self.assertRaisesRegex(InstallError, "ссылку" if os.name == "nt" else "обычным каталогом"):
                 controller.export_portable(REQUEST_ID, linked_parent)
             self.assertEqual(len(transport.manager.calls), 0)
 
