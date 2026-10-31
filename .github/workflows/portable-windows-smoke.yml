@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 Jigokuraku01
+# Additional author attribution terms: see ATTRIBUTION.md.
+name: Portable backup Windows smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-windows:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Verify system OpenSSH
+        run: python -c "import shutil; assert shutil.which('ssh'), 'OpenSSH Client is required'"
+      - name: Exercise portable export, private ACLs and exclusive publish
+        run: python -m unittest discover -s tests -p test_host_backup.py -v
