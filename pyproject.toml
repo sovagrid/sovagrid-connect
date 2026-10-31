@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sovagrid-connect"
-version = "0.6.0"
+version = "0.7.0"
 description = "Desktop SSH connector for the full SovaGrid web panel"
 requires-python = ">=3.9"
 dependencies = []

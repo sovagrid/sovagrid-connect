@@ -21,9 +21,9 @@ from .installer import InstallError, MAX_ARCHIVE_BYTES, verify_bundle
 
 PUBLISHED_SERVER_SOURCE_URL = (
     "https://github.com/sovagrid/sovagrid-blueprint/releases/download/"
-    "v0.10.0-preview/SovaGrid-server-source-0.10.0-preview.tar.gz"
+    "server-v0.11.0/SovaGrid-server-source.tar.gz"
 )
-PUBLISHED_SERVER_SOURCE_SHA256 = "275c5f03c30b1a924b1fcb48067a41f7b76481cd4c249589a7c8b5098db749fb"
+PUBLISHED_SERVER_SOURCE_SHA256 = "10abb18ca39d789d3a9cc8bd04d36126f6dd624a81e48219bd814fb6a15ab766"
 _ASSET_HOST = "release-assets.githubusercontent.com"
 _ASSET_PREFIX = "/github-production-release-asset/"
 _CHUNK_BYTES = 256 * 1024
@@ -60,7 +60,7 @@ def _download_into(destination: Path, *, progress: Callable[[str], None] | None 
                    opener=None) -> None:
     opener = opener or build_opener(_ReleaseRedirectHandler())
     request = Request(PUBLISHED_SERVER_SOURCE_URL, headers={
-        "User-Agent": "SovaGrid-Connect/0.10.0-preview",
+        "User-Agent": "SovaGrid-Connect/0.7.0",
         "Accept-Encoding": "identity",
     })
     digest = hashlib.sha256()
