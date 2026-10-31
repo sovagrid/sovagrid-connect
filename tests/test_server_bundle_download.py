@@ -8,13 +8,16 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.request import Request
 
 from sovagrid_connect.installer import InstallError
 from sovagrid_connect.server_bundle_download import (
-    PUBLISHED_SERVER_SOURCE_URL, _ReleaseRedirectHandler, downloaded_server_bundle,
+    PUBLISHED_SERVER_SOURCE_URL, _ReleaseRedirectHandler, cached_published_server_bundle,
+    downloaded_server_bundle,
 )
 
 
@@ -44,6 +47,33 @@ class Opener:
 
 
 class ServerBundleDownloadTests(unittest.TestCase):
+    def test_verified_update_cache_survives_dialog_and_rechecks_existing_bytes(self) -> None:
+        payload = b"published update fixture"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("sovagrid_connect.server_bundle_download.PUBLISHED_SERVER_SOURCE_SHA256", digest), \
+             patch("sovagrid_connect.server_bundle_download.verify_bundle") as verify:
+            root = Path(directory) / "cache"
+            first = cached_published_server_bundle(cache_dir=root, opener=Opener(Response(payload)))
+            self.assertEqual(first.read_bytes(), payload)
+            self.assertEqual(first.name, f"{digest}.tar.gz")
+            if os.name != "nt":
+                self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(first.stat().st_mode & 0o777, 0o600)
+            again = cached_published_server_bundle(cache_dir=root, opener=Opener(Response(b"wrong")))
+            self.assertEqual(again, first)
+            first.write_bytes(b"corrupt")
+            recovered = cached_published_server_bundle(cache_dir=root, opener=Opener(Response(payload)))
+            self.assertEqual(recovered.read_bytes(), payload)
+            self.assertEqual(verify.call_count, 3)
+
+    def test_update_cache_does_not_keep_failed_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "cache"
+            with self.assertRaisesRegex(InstallError, "SHA-256"):
+                cached_published_server_bundle(cache_dir=root, opener=Opener(Response(b"wrong")))
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_download_checks_digest_layout_and_private_file_before_yield(self) -> None:
         payload = b"published fixture"
         opener = Opener(Response(payload, **{"Content-Length": str(len(payload))}))

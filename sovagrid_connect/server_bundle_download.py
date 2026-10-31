@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Jigokuraku01
 # Additional author attribution terms: see ATTRIBUTION.md.
-"""Download the one published first-install source bundle into a private file."""
+"""Download the pinned published server bundle into a private file."""
 
 from __future__ import annotations
 
 import hashlib
 import os
 from pathlib import Path
+import stat
 import tempfile
 import time
 from contextlib import contextmanager
@@ -17,6 +18,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .installer import InstallError, MAX_ARCHIVE_BYTES, verify_bundle
+from .theme import preference_file
 
 
 PUBLISHED_SERVER_SOURCE_URL = (
@@ -111,7 +113,7 @@ def _download_into(destination: Path, *, progress: Callable[[str], None] | None 
         progress("SHA-256 совпал; проверяем структуру серверного пакета…")
     verify_bundle(destination)
     if progress:
-        progress("Серверный пакет проверен; начинаем установку по SSH…")
+        progress("Серверный пакет проверен и готов к передаче по SSH…")
 
 
 @contextmanager
@@ -122,3 +124,42 @@ def downloaded_server_bundle(*, progress: Callable[[str], None] | None = None,
         destination = Path(directory) / "server-source.tar.gz"
         _download_into(destination, progress=progress, opener=opener)
         yield destination
+
+
+def cached_published_server_bundle(*, progress: Callable[[str], None] | None = None,
+                                   opener=None, cache_dir: Path | None = None) -> Path:
+    """Return a persistent, verified copy for the multi-step update dialog.
+
+    The first-install context manager can delete its file when installation
+    finishes. Updates may instead be approved for a later idle window, so
+    their local source must remain available after the dialog closes.
+    """
+    root = cache_dir or preference_file().parent / "server-bundles"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (os.name != "nt" and info.st_mode & 0o077):
+        raise InstallError("Каталог сохранённых пакетов должен быть доступен только текущему пользователю")
+    destination = root / f"{PUBLISHED_SERVER_SOURCE_SHA256}.tar.gz"
+    try:
+        info = destination.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None and stat.S_ISREG(info.st_mode) and (os.name == "nt" or not info.st_mode & 0o077):
+        if 0 < info.st_size <= MAX_ARCHIVE_BYTES and _sha256_file(destination) == PUBLISHED_SERVER_SOURCE_SHA256:
+            verify_bundle(destination)
+            if progress:
+                progress("Проверенный серверный пакет уже сохранён в приложении")
+            return destination
+    with tempfile.TemporaryDirectory(prefix="sovagrid-bundle-", dir=root) as directory:
+        temporary = Path(directory) / "server-source.tar.gz"
+        _download_into(temporary, progress=progress, opener=opener)
+        os.replace(temporary, destination)
+    return destination
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

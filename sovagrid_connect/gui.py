@@ -20,7 +20,8 @@ from contextlib import nullcontext
 from .core import ConnectionOptions, Tunnel
 from .installer import (InstallError, InstallFeatures, PreparedUpdate, ServerInstaller,
                         UpdatePreview, nearby_server_bundle, parse_journal_units)
-from .server_bundle_download import PUBLISHED_SERVER_SOURCE_SHA256, downloaded_server_bundle
+from .server_bundle_download import (PUBLISHED_SERVER_SOURCE_SHA256, cached_published_server_bundle,
+                                     downloaded_server_bundle)
 from .ssh_profiles import OpenSSHProfiles, ProfileImportError
 from .theme import CHOICES, LABELS, ThemeManager
 from .legal import ATTRIBUTION, SOURCE_URL, document, third_party_document, third_party_documents
@@ -96,6 +97,8 @@ class Launcher:
         self.update_manager: ServerInstaller | None = None
         self.update_preview: UpdatePreview | None = None
         self.update_prepared: PreparedUpdate | None = None
+        self.update_source_path: Path | None = None
+        self.update_source_controls: list[ttk.Widget] = []
         self.update_auto_button: ttk.Button | None = None
         self.update_server_auto_button: ttk.Button | None = None
         self.update_server_status_button: ttk.Button | None = None
@@ -1124,7 +1127,7 @@ class Launcher:
             if source_mode.get() == "release":
                 displayed_bundle.set("Автоматически с GitHub")
                 bundle_info.set("Серверный выпуск 0.12.0: скачивание, проверка SHA-256 и структуры до SSH-передачи.")
-            elif bundle.get() and pinned_nearby and Path(bundle.get()).resolve() == suggested[0]:
+            elif bundle.get() and pinned_nearby and Path(bundle.get()).resolve() == suggested[0].resolve():
                 displayed_bundle.set(bundle.get())
                 bundle_info.set("Проверенный пакет рядом с приложением · SHA-256 закреплён в Connect")
             elif bundle.get():
@@ -1467,16 +1470,43 @@ class Launcher:
             wraplength=540,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
         suggested = nearby_server_bundle()
-        bundle = tk.StringVar(value=str(suggested[0]) if suggested else "")
-        ttk.Entry(body, textvariable=bundle, width=53, state="readonly").grid(
+        pinned_nearby = suggested is not None and suggested[1] == PUBLISHED_SERVER_SOURCE_SHA256
+        bundle = tk.StringVar(value=str(suggested[0]) if pinned_nearby else "")
+        source_mode = tk.StringVar(value="local" if pinned_nearby else "release")
+        displayed_bundle = tk.StringVar()
+        ttk.Entry(body, textvariable=displayed_bundle, width=53, state="readonly").grid(
             row=2, column=0, columnspan=2, sticky="ew"
         )
-        detail = tk.StringVar(value=(
-            f"Пакет рядом с приложением · SHA-256 {suggested[1]}" if suggested else "Выберите локальный пакет SovaGrid"
-        ))
-        ttk.Label(body, textvariable=detail, wraplength=540).grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(7, 0)
-        )
+        detail = tk.StringVar()
+
+        def clear_selection() -> None:
+            self.update_preview = None
+            self.update_prepared = None
+            self.update_source_path = None
+            for button in (self.update_apply_button, self.update_auto_button,
+                           self.update_server_auto_button):
+                if button is not None:
+                    button.configure(state="disabled")
+
+        def show_source() -> None:
+            if source_mode.get() == "release":
+                displayed_bundle.set("Скачать проверенный выпуск 0.12.0 с GitHub")
+                detail.set("Connect сохранит пакет в закрытом каталоге и сверит закреплённый SHA-256 перед SSH-передачей.")
+            elif bundle.get() and pinned_nearby and Path(bundle.get()).resolve() == suggested[0]:
+                displayed_bundle.set(bundle.get())
+                detail.set("Проверенный пакет рядом с приложением · SHA-256 закреплён в Connect")
+            elif bundle.get():
+                displayed_bundle.set(bundle.get())
+                detail.set("Свой архив: источник не закреплён в Connect. SHA-256 появится после проверки.")
+            else:
+                displayed_bundle.set("")
+                detail.set("Для своего архива выберите локальный файл.")
+
+        def change_source() -> None:
+            if self.installing:
+                return
+            clear_selection()
+            show_source()
 
         def choose_bundle() -> None:
             if self.installing:
@@ -1487,46 +1517,44 @@ class Launcher:
             )
             if selected:
                 bundle.set(selected)
-                detail.set(f"Выбран файл: {Path(selected).name} · SHA-256 будет показан после проверки")
-                self.update_preview = None
-                self.update_prepared = None
-                if self.update_apply_button is not None:
-                    self.update_apply_button.configure(state="disabled")
-                if self.update_auto_button is not None:
-                    self.update_auto_button.configure(state="disabled")
-                if self.update_server_auto_button is not None:
-                    self.update_server_auto_button.configure(state="disabled")
+                source_mode.set("local")
+                change_source()
 
-        ttk.Button(body, text="Выбрать пакет…", command=choose_bundle).grid(row=2, column=2, padx=(8, 0))
+        choose_button = ttk.Button(body, text="Выбрать свой архив…", command=choose_bundle)
+        choose_button.grid(row=2, column=2, padx=(8, 0))
+        release_radio = ttk.Radiobutton(body, text="Скачать проверенный выпуск", value="release",
+                                        variable=source_mode, command=change_source)
+        release_radio.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        local_radio = ttk.Radiobutton(body, text="Свой архив", value="local",
+                                      variable=source_mode, command=change_source)
+        local_radio.grid(row=3, column=2, sticky="w", pady=(8, 0))
+        self.update_source_controls = [choose_button, release_radio, local_radio]
+        show_source()
+        ttk.Label(body, textvariable=detail, wraplength=540).grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(7, 0)
+        )
         ttk.Label(
             body,
             text="При применении Connect сохраняет предыдущие образы, исходники, настройки и данные Hub, "
                  "проверяет службы и при ошибке пытается восстановить их. Дополнительные пакеты ОС и "
                  "учётные записи, созданные установщиком, автоматически не удаляются.",
             wraplength=540,
-        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(14, 10))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(14, 10))
         self.update_status = tk.StringVar(value="Ожидание проверки")
         ttk.Label(body, textvariable=self.update_status, wraplength=540).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(0, 12)
+            row=6, column=0, columnspan=3, sticky="w", pady=(0, 12)
         )
         controls = ttk.Frame(body)
-        controls.grid(row=6, column=0, columnspan=3, sticky="w")
+        controls.grid(row=7, column=0, columnspan=3, sticky="w")
 
         def begin() -> None:
             if self.installing:
                 return
-            selected = bundle.get()
-            if not selected:
+            selected = bundle.get() if source_mode.get() == "local" else None
+            if source_mode.get() == "local" and not selected:
                 messagebox.showerror("Обновление SovaGrid", "Сначала выберите пакет SovaGrid.", parent=window)
                 return
-            self.update_preview = None
-            self.update_prepared = None
-            if self.update_apply_button is not None:
-                self.update_apply_button.configure(state="disabled")
-            if self.update_auto_button is not None:
-                self.update_auto_button.configure(state="disabled")
-            if self.update_server_auto_button is not None:
-                self.update_server_auto_button.configure(state="disabled")
+            clear_selection()
             for button in (self.update_server_status_button, self.update_server_disarm_button):
                 if button is not None:
                     button.configure(state="disabled")
@@ -1536,15 +1564,21 @@ class Launcher:
             self.feature_button.configure(state="disabled")
             self.update_button.configure(state="disabled")
             self.connect_button.configure(state="disabled")
+            for control in self.update_source_controls:
+                control.configure(state="disabled")
             self.update_status.set("Проверка пакета и сервера без изменений…")
             manager = ServerInstaller(options, progress=lambda line: self.events.put(("update_progress", line)))
             self.update_manager = manager
 
             def worker() -> None:
                 try:
-                    expected = suggested[1] if suggested and Path(selected).resolve() == suggested[0] else None
-                    preview = manager.preview_update(Path(selected), expected_sha256=expected)
-                    self.events.put(("update_preview", (manager, Path(selected), preview)))
+                    source = (cached_published_server_bundle(
+                        progress=lambda line: self.events.put(("update_progress", line)),
+                    ) if selected is None else Path(selected))
+                    expected = (PUBLISHED_SERVER_SOURCE_SHA256 if selected is None or
+                                (pinned_nearby and source.resolve() == suggested[0].resolve()) else None)
+                    preview = manager.preview_update(source, expected_sha256=expected)
+                    self.events.put(("update_preview", (manager, source, preview)))
                 except Exception as exc:
                     self.events.put(("update_error", exc))
 
@@ -1584,6 +1618,8 @@ class Launcher:
             self.feature_button.configure(state="disabled")
             self.update_button.configure(state="disabled")
             self.connect_button.configure(state="disabled")
+            for control in self.update_source_controls:
+                control.configure(state="disabled")
             self.update_status.set("Повторная проверка SHA-256 и версии на сервере…")
             manager = ServerInstaller(options, progress=lambda line: self.events.put(("update_progress", line)))
             self.update_manager = manager
@@ -1603,7 +1639,8 @@ class Launcher:
 
         def approve_automatic() -> None:
             preview, prepared = self.update_preview, self.update_prepared
-            if self.installing or preview is None or prepared is None or preview.sha256 != prepared.sha256:
+            if (self.installing or preview is None or prepared is None or self.update_source_path is None or
+                    preview.sha256 != prepared.sha256):
                 return
             if not messagebox.askyesno(
                 "Применить при простое",
@@ -1616,7 +1653,7 @@ class Launcher:
                 return
             try:
                 policy = AutoUpdatePolicy.approve(
-                    options, Path(bundle.get()).resolve(), prepared.sha256,
+                    options, self.update_source_path, prepared.sha256,
                     preview.current_manifest_sha256, enabled=True,
                 )
                 self._auto_policy_store().save(policy)
@@ -1640,7 +1677,7 @@ class Launcher:
         ttk.Button(controls, text="Закрыть", command=self.close_update).pack(side="left", padx=(8, 0))
 
         server_controls = ttk.LabelFrame(body, text="Автообновление на самом сервере", padding=10)
-        server_controls.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        server_controls.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(14, 0))
         ttk.Label(
             server_controls,
             text="Разрешите один подготовленный пакет. Сервер проверит простой и выполнит обновление "
@@ -1737,6 +1774,8 @@ class Launcher:
         self.update_manager = None
         self.update_preview = None
         self.update_prepared = None
+        self.update_source_path = None
+        self.update_source_controls = []
         self.update_auto_button = None
         self.update_server_auto_button = None
         self.update_server_status_button = None
@@ -1824,6 +1863,8 @@ class Launcher:
         self.connect_button.configure(state="normal" if self.tunnel is None else "disabled")
         if self.update_start_button is not None:
             self.update_start_button.configure(state="normal")
+        for control in self.update_source_controls:
+            control.configure(state="normal")
         self._restore_update_dialog_controls()
 
     def _restore_update_dialog_controls(self) -> None:
@@ -2202,6 +2243,7 @@ class Launcher:
                 manager, source, preview = payload
                 if manager is self.update_manager and self.update_window is not None:
                     self.update_preview = preview
+                    self.update_source_path = source.resolve()
                     active = ", ".join(name for enabled, name in (
                         (preview.features.wireguard, "WireGuard"),
                         (preview.features.terminal, "терминал"),
@@ -2212,11 +2254,15 @@ class Launcher:
                         f"{name}: {preview.current_commits[name][:12]} → {commit[:12]}"
                         for name, commit in sorted(preview.bundle.commits.items())
                     )
+                    source_note = ("Пакет совпадает с закреплённым выпуском SovaGrid." if
+                                   preview.sha256 == PUBLISHED_SERVER_SOURCE_SHA256 else
+                                   "Свой архив: сверьте источник и SHA-256 самостоятельно.")
                     confirmed = messagebox.askyesno(
                         "Подготовить обновление SovaGrid",
                         f"Сервер проверен. Включены: {active}.\n\n"
                         f"Пакет: {preview.bundle.files} файлов, {preview.bundle.size // 1024} КиБ\n"
                         f"SHA-256: {preview.sha256}\n\n"
+                        f"{source_note}\n\n"
                         f"Текущие → новые версии:\n{versions}\n\n"
                         "Передать и проверить этот пакет на сервере? Работающие службы и активные исходники "
                         "не изменятся. Commit ID показывают состав пакета, но не доказывают, что он новее. "
