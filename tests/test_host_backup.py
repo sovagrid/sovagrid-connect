@@ -4,6 +4,7 @@
 """Host archives require a pinned root source and unambiguous metadata replies."""
 
 from contextlib import contextmanager
+import copy
 import hashlib
 import io
 import json
@@ -230,6 +231,43 @@ class HostBackupTests(unittest.TestCase):
     def controller(self, transport, manifest=MANIFEST):
         return HostBackupController(transport.options, approved_manifest_sha256=manifest,
                                     transport=transport)
+
+    def test_portable_v2_accepts_exact_unit_states_and_keeps_v1(self):
+        transport = Transport()
+        controller = self.controller(transport)
+        archive = HostArchive(**RECORD)
+        self.assertEqual(controller._receipt(RECEIPT, archive, MANIFEST), RECEIPT)
+        value = copy.deepcopy(RECEIPT)
+        value["protocol"] = "sovagrid-portable-host-receipt-v2"
+        value["unit_states"] = {
+            "sovagrid-agent.service": {"active": True, "enablement": "enabled", "sha256": "a" * 64},
+            "sovagrid-release-feed.timer": {
+                "active": True, "enablement": "disabled", "sha256": "b" * 64},
+        }
+        self.assertEqual(controller._receipt(value, archive, MANIFEST), value)
+        local = copy.deepcopy(value)
+        local["unit_states"]["sovagrid-agent-local.service"] = local["unit_states"].pop("sovagrid-agent.service")
+        self.assertEqual(controller._receipt(local, HostArchive(**{**RECORD, "layout": "hub-only"}), MANIFEST), local)
+        mutations = (
+            lambda receipt: receipt["unit_states"].update({"sovagrid-unreviewed.service": {
+                "active": False, "enablement": "disabled", "sha256": "a" * 64}}),
+            lambda receipt: receipt["unit_states"]["sovagrid-agent.service"].update(active=1),
+            lambda receipt: receipt["unit_states"]["sovagrid-agent.service"].update(enablement="invalid"),
+            lambda receipt: receipt["unit_states"]["sovagrid-agent.service"].update(extra=True),
+            lambda receipt: receipt["unit_states"]["sovagrid-release-feed.timer"].update(sha256="c" * 64),
+            lambda receipt: receipt["unit_states"]["sovagrid-release-feed.timer"].update(active=False),
+            lambda receipt: receipt["unit_states"].pop("sovagrid-release-feed.timer"),
+            lambda receipt: receipt.update(active_units=[], unit_hashes={}),
+            lambda receipt: receipt.update(protocol=RECEIPT["protocol"]),
+        )
+        for mutate in mutations:
+            wrong = copy.deepcopy(value)
+            mutate(wrong)
+            with self.subTest(receipt=wrong):
+                with self.assertRaises(InstallError):
+                    controller._receipt(wrong, archive, MANIFEST)
+        with self.assertRaises(InstallError):
+            controller._receipt(value, HostArchive(**{**RECORD, "layout": "hub-only"}), MANIFEST)
 
     def test_pinned_source_must_pass_before_backup_cli(self):
         transport = Transport()
@@ -534,11 +572,23 @@ class HostBackupTests(unittest.TestCase):
         self.assertFalse(self.controller(transport, None).portable_available())
 
     def test_export_portable_streams_exact_pair_into_private_published_folder(self):
+        for v2 in (False, True):
+            with self.subTest(v2=v2):
+                self._export_portable_streams_exact_pair(v2)
+
+    def _export_portable_streams_exact_pair(self, v2):
         host_bytes = b"H" * RECORD["bytes"]
         image_bytes = b"I" * 4096
         receipt = {**RECEIPT,
                    "host_archive_sha256": hashlib.sha256(host_bytes).hexdigest(),
                    "images_sha256": hashlib.sha256(image_bytes).hexdigest()}
+        if v2:
+            receipt["protocol"] = "sovagrid-portable-host-receipt-v2"
+            receipt["unit_states"] = {
+                "sovagrid-agent.service": {"active": True, "enablement": "enabled", "sha256": "a" * 64},
+                "sovagrid-release-feed.timer": {
+                    "active": True, "enablement": "disabled", "sha256": "b" * 64},
+            }
         transport = Transport()
         transport.operations[REQUEST_ID] = operation("complete", archive=RECORD)
         transport.portable_requests.add(REQUEST_ID)

@@ -28,6 +28,7 @@ PROTOCOL = "sovagrid-host-backup-v1"
 OPERATION_PROTOCOL = "sovagrid-host-backup-operation-v1"
 IMAGE_PROTOCOL = "sovagrid-host-images-v1"
 PORTABLE_RECEIPT_PROTOCOL = "sovagrid-portable-host-receipt-v1"
+PORTABLE_RECEIPT_PROTOCOL_V2 = "sovagrid-portable-host-receipt-v2"
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 ARCHIVE_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -36,6 +37,59 @@ MAX_ARCHIVES = 100
 MAX_BYTES = 8 * 1024**3
 MAX_FILES = 20_000
 MAX_PORTABLE_RECEIPT = 8192
+PORTABLE_UNIT_ENABLEMENT = frozenset((
+    "enabled", "enabled-runtime", "disabled", "static", "indirect", "alias",
+    "masked", "masked-runtime", "linked", "linked-runtime", "generated", "transient",
+))
+# Exact unit-file sources archived by Blueprint; arbitrary systemd names are
+# never accepted as restore metadata.
+PORTABLE_MANAGED_UNITS = {
+    "full": frozenset("""
+        sovagrid-agent.service sovagrid-amnezia-control.service sovagrid-amnezia-control.socket
+        sovagrid-auto-update.service sovagrid-auto-update.timer
+        sovagrid-container-inventory.service sovagrid-container-inventory.timer
+        sovagrid-hub-backup-control.service sovagrid-hub-backup-control.socket
+        sovagrid-journal-control.service sovagrid-journal-control.socket
+        sovagrid-release-feed.service sovagrid-release-feed.timer
+        sovagrid-service-control.service sovagrid-service-control.socket
+        sovagrid-terminal-control.service sovagrid-terminal-control.socket
+        sovagrid-vpn-control.service sovagrid-vpn-control.socket sovagrid-vpn-routing.service
+        sovagrid-vpn-status.service sovagrid-vpn-status.timer
+        sovagrid-web-agent-control.service sovagrid-web-agent-control.socket
+    """.split()),
+    "hub-only": frozenset("""
+        sovagrid-agent-local.service
+        sovagrid-container-inventory-local.service sovagrid-container-inventory-local.timer
+        sovagrid-external-agent-apply@.service sovagrid-external-agent-recovery.service
+        sovagrid-hub-backup-control.service sovagrid-hub-backup-control.socket
+        sovagrid-hub-only-update.service sovagrid-hub-only-update.timer
+        sovagrid-release-feed.service sovagrid-release-feed.timer
+        sovagrid-service-local-control.service sovagrid-service-local-control.socket
+        sovagrid-terminal-local-control.service sovagrid-terminal-local-control.socket
+        sovagrid-vpn-routing.service sovagrid-vpn-status.service sovagrid-vpn-status.timer
+        sovagrid-web-agent-control.service sovagrid-web-agent-control.socket
+    """.split()),
+}
+PORTABLE_WRITER_UNITS = {
+    "full": frozenset("""
+        sovagrid-amnezia-control.service sovagrid-amnezia-control.socket
+        sovagrid-auto-update.service sovagrid-auto-update.timer
+        sovagrid-container-inventory.service sovagrid-container-inventory.timer
+        sovagrid-hub-backup-control.service sovagrid-hub-backup-control.socket
+        sovagrid-release-feed.service sovagrid-release-feed.timer
+        sovagrid-vpn-control.service sovagrid-vpn-control.socket
+        sovagrid-vpn-status.service sovagrid-vpn-status.timer
+        sovagrid-web-agent-control.service sovagrid-web-agent-control.socket
+    """.split()),
+    "hub-only": frozenset("""
+        sovagrid-container-inventory-local.service sovagrid-container-inventory-local.timer
+        sovagrid-hub-backup-control.service sovagrid-hub-backup-control.socket
+        sovagrid-hub-only-update.service sovagrid-hub-only-update.timer
+        sovagrid-release-feed.service sovagrid-release-feed.timer
+        sovagrid-vpn-status.service sovagrid-vpn-status.timer
+        sovagrid-web-agent-control.service sovagrid-web-agent-control.socket
+    """.split()),
+}
 PORTABLE_REPLY_LIMIT = 12288
 PORTABLE_SERVICES = (frozenset(("hub", "web")),
                      frozenset(("hub", "web", "ssh-gateway")))
@@ -351,12 +405,15 @@ class HostBackupController(ApprovedManifestMixin):
                 "source_manifest_sha256", "images_sha256", "images",
                 "container_ids", "exported_configs", "rootfs_sha256",
                 "active_units", "unit_hashes"}
-        if not isinstance(value, dict) or set(value) != keys:
+        if not isinstance(value, dict):
+            raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        v2 = value.get("protocol") == PORTABLE_RECEIPT_PROTOCOL_V2
+        if set(value) != (keys | {"unit_states"} if v2 else keys):
             raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
         receipt_bytes = len(json.dumps(value, sort_keys=True,
                                        separators=(",", ":")).encode("utf-8")) + 1
         if (receipt_bytes > MAX_PORTABLE_RECEIPT or
-                value["protocol"] != PORTABLE_RECEIPT_PROTOCOL or
+                value["protocol"] not in (PORTABLE_RECEIPT_PROTOCOL, PORTABLE_RECEIPT_PROTOCOL_V2) or
                 value["host_archive_id"] != archive.id or
                 not isinstance(value["host_archive_sha256"], str) or
                 SHA.fullmatch(value["host_archive_sha256"]) is None or
@@ -391,6 +448,20 @@ class HostBackupController(ApprovedManifestMixin):
                 any(not isinstance(item, str) or SHA.fullmatch(item) is None
                     for item in hashes.values())):
             raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        if v2:
+            states = value["unit_states"]
+            if (not isinstance(states, dict) or len(states) > 32 or
+                    any(not isinstance(name, str) or name not in PORTABLE_MANAGED_UNITS[archive.layout] or
+                        not isinstance(state, dict) or set(state) != {"active", "enablement", "sha256"} or
+                        type(state["active"]) is not bool or
+                        not isinstance(state["enablement"], str) or state["enablement"] not in PORTABLE_UNIT_ENABLEMENT or
+                        not isinstance(state["sha256"], str) or SHA.fullmatch(state["sha256"]) is None
+                        for name, state in states.items()) or
+                    set(units) != {name for name, state in states.items()
+                                   if name in PORTABLE_WRITER_UNITS[archive.layout] and state["active"]} or
+                    not set(hashes).issubset(states) or
+                    any(states[name]["sha256"] != digest for name, digest in hashes.items())):
+                raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
         return value
 
     def _portable_operation(self, value: object, identity: str,
