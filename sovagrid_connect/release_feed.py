@@ -23,6 +23,21 @@ KEY_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
 VERSION = re.compile(r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\Z")
 
 
+def approved_manifests(value: str | tuple[str, ...] | None) -> tuple[str, ...]:
+    """Normalize the small, reviewed source allowlist before any SSH action."""
+    if value is None:
+        values = ()
+    elif isinstance(value, str):
+        values = (value,)
+    else:
+        values = value
+    if (not isinstance(values, tuple) or len(values) > 16 or
+            any(not isinstance(item, str) or SHA.fullmatch(item) is None for item in values) or
+            len(set(values)) != len(values)):
+        raise InstallError("SHA-256 проверенного серверного выпуска неверен")
+    return values
+
+
 @dataclass(frozen=True)
 class ReleaseFeedState:
     options: ConnectionOptions
@@ -41,25 +56,24 @@ class ReleaseFeedState:
 
 
 class ReleaseFeedController:
-    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | None,
+    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | tuple[str, ...] | None,
                  popen: Callable[..., subprocess.Popen] = subprocess.Popen,
                  progress: Callable[[str], None] | None = None,
                  transport: PromotionController | None = None) -> None:
-        if approved_manifest_sha256 is not None and SHA.fullmatch(approved_manifest_sha256) is None:
-            raise InstallError("SHA-256 проверенного серверного выпуска неверен")
+        approved = approved_manifests(approved_manifest_sha256)
         self.transport = transport or PromotionController(
             options, approved_archive_sha256="0" * 64, popen=popen, progress=progress,
         )
         self.options = self.transport.options
-        self.approved_manifest_sha256 = approved_manifest_sha256
+        self.approved_manifest_sha256s = approved
         self.progress = progress or (lambda _message: None)
         self._reviewed_state: ReleaseFeedState | None = None
 
-    def _state(self, raw: bytes) -> ReleaseFeedState:
+    def _state(self, raw: bytes, expected_manifest: str) -> ReleaseFeedState:
         result = _json(raw)
         feed = result.get("feed")
         if (set(result) != {"protocol", "source_manifest_sha256", "units_verified", "feed"} or
-                result["source_manifest_sha256"] != self.approved_manifest_sha256 or
+                result["source_manifest_sha256"] != expected_manifest or
                 type(result["units_verified"]) is not bool or not isinstance(feed, dict) or
                 set(feed) != {"format", "channel", "enabled", "key_id", "available_keys",
                               "timer_installed", "timer_enabled", "timer_active",
@@ -72,7 +86,7 @@ class ReleaseFeedController:
                      "manual_candidate_active")) or
                 feed["timer_installed"] is not result["units_verified"] or
                 (feed["timer_active"] and not feed["timer_installed"]) or
-                feed["installed_manifest_sha256"] != self.approved_manifest_sha256 or
+                feed["installed_manifest_sha256"] != expected_manifest or
                 not isinstance(feed["state_revision"], str) or
                 SHA.fullmatch(feed["state_revision"]) is None):
             raise InstallError("Сервер прислал неверный статус подписанного канала")
@@ -106,25 +120,25 @@ class ReleaseFeedController:
 
     def preview(self) -> ReleaseFeedState:
         self._reviewed_state = None
-        manifest = self.approved_manifest_sha256
-        if manifest is None:
+        if not self.approved_manifest_sha256s:
             raise InstallError("Подписанный канал ждёт проверенный серверный выпуск")
         self.progress("Проверка SSH-маршрута, исходников, systemd и ключей без изменений…")
         self.transport._verify_root_access()
-        command = (self.transport._privileged + "/usr/bin/python3 -I -c " +
-                   shlex.quote(SCRIPT) + " status " + manifest)
-        code, raw = self.transport._execute(command, timeout=120)
-        if code != 0:
-            raise InstallError("Сервер не подтвердил точный исходный код или units канала; "
-                               "состояние не изменено")
-        state = self._state(raw)
-        self._reviewed_state = state
-        return state
+        for manifest in self.approved_manifest_sha256s:
+            command = (self.transport._privileged + "/usr/bin/python3 -I -c " +
+                       shlex.quote(SCRIPT) + " status " + manifest)
+            code, raw = self.transport._execute(command, timeout=120)
+            if code == 0:
+                state = self._state(raw, manifest)
+                self._reviewed_state = state
+                return state
+        raise InstallError("Сервер не подтвердил точный исходный код или units канала; "
+                           "состояние не изменено")
 
     def _change(self, state: ReleaseFeedState, action: str, key_id: str) -> ReleaseFeedState:
         if (state is not self._reviewed_state or
                 state.options != self.options or
-                state.manifest_sha256 != self.approved_manifest_sha256 or
+                state.manifest_sha256 not in self.approved_manifest_sha256s or
                 state.state_revision is None or SHA.fullmatch(state.state_revision) is None):
             raise InstallError("Сначала повторно проверьте состояние подписанного канала")
         if action == "enable":

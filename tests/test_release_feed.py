@@ -16,14 +16,15 @@ MANIFEST = "3" * 64
 FINGERPRINT = "a" * 64
 
 
-def wire(*, enabled=False, keys=None, installed=True, manual=True, revision="b" * 64):
+def wire(*, enabled=False, keys=None, installed=True, manual=True, revision="b" * 64,
+         manifest=MANIFEST):
     keys = {"fixture-key": FINGERPRINT} if keys is None else keys
     return json.dumps({
-        "protocol": 1, "source_manifest_sha256": MANIFEST, "units_verified": installed,
+        "protocol": 1, "source_manifest_sha256": manifest, "units_verified": installed,
         "feed": {"format": 1, "channel": "stable", "enabled": enabled,
                  "key_id": "fixture-key" if enabled else None, "available_keys": keys,
                  "timer_installed": installed, "timer_enabled": enabled,
-                 "timer_active": enabled, "installed_manifest_sha256": MANIFEST,
+                 "timer_active": enabled, "installed_manifest_sha256": manifest,
                  "state_revision": revision,
                  "manual_candidate_active": manual,
                  "ledger": {"format": 1, "highest_sequence": 2,
@@ -42,6 +43,7 @@ class Transport:
         self.reply = wire()
         self.code = 0
         self.scripted = []
+        self.expected_status_manifests = {MANIFEST}
 
     def _verify_root_access(self):
         self.root_proofs += 1
@@ -56,7 +58,8 @@ class Transport:
             assert timeout == 300
             assert limit == 512
         else:
-            assert command.endswith(" status " + MANIFEST)
+            assert any(command.endswith(" status " + manifest)
+                       for manifest in self.expected_status_manifests)
             assert timeout == 120
         return self.scripted.pop(0) if self.scripted else (self.code, self.reply)
 
@@ -80,6 +83,48 @@ class ReleaseFeedTests(unittest.TestCase):
             self.controller(transport, None).preview()
         self.assertEqual(transport.root_proofs, 0)
         self.assertEqual(transport.commands, [])
+
+    def test_reviewed_manifest_allowlist_selects_exact_installed_source(self):
+        older = "1" * 64
+        transport = Transport()
+        transport.expected_status_manifests.add(older)
+        transport.scripted = [
+            (40, b"SG_RELEASE_FEED_CLIENT_REFUSE:SOURCE_MANIFEST\n"),
+            (0, wire()),
+        ]
+        controller = self.controller(transport, (older, MANIFEST))
+        state = controller.preview()
+        self.assertEqual(state.manifest_sha256, MANIFEST)
+        self.assertEqual(len(transport.commands), 2)
+        self.assertTrue(transport.commands[0].endswith(" status " + older))
+        self.assertTrue(transport.commands[1].endswith(" status " + MANIFEST))
+        transport.scripted = [
+            (40, b"SG_RELEASE_FEED_CLIENT_REFUSE:SOURCE_MANIFEST\n"),
+            (0, wire()),
+            (0, b"SG_RELEASE_FEED_CLIENT_APPLIED:enable\n"),
+            (40, b"SG_RELEASE_FEED_CLIENT_REFUSE:SOURCE_MANIFEST\n"),
+            (0, wire(enabled=True, revision="c" * 64)),
+        ]
+        enabled = controller.enable(state, "fixture-key")
+        self.assertTrue(enabled.enabled)
+        self.assertTrue(any(" mutate " + MANIFEST + " enable " in command
+                            for command in transport.commands))
+
+        unknown = Transport()
+        unknown.expected_status_manifests = {older}
+        unknown.scripted = [(40, b"SG_RELEASE_FEED_CLIENT_REFUSE:SOURCE_MANIFEST\n")]
+        with self.assertRaisesRegex(InstallError, "не подтвердил точный"):
+            self.controller(unknown, (older,)).preview()
+        self.assertEqual(len(unknown.commands), 1)
+
+    def test_bad_or_duplicate_manifest_allowlist_refuses_before_ssh(self):
+        for value in ((MANIFEST, MANIFEST), (MANIFEST, "not-a-digest"),
+                      (MANIFEST, ["bad"]), [MANIFEST], tuple([MANIFEST] * 17)):
+            transport = Transport()
+            with self.subTest(value=value), self.assertRaises(InstallError):
+                self.controller(transport, value)
+            self.assertEqual(transport.root_proofs, 0)
+            self.assertEqual(transport.commands, [])
 
     def test_sudo_status_shows_embedded_key_and_separate_candidate(self):
         transport = Transport("admin")

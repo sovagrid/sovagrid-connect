@@ -55,8 +55,10 @@ _APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "7f42a3e3bf47ae63bd42cb4dac84188
 _APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17"
 _APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
 _APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
-# Pin only after the signed-feed server bundle and under-lock CAS contract pass VM review.
-_APPROVED_RELEASE_FEED_MANIFEST_SHA256: str | None = None
+# Extend this allowlist only after each signed-feed server bundle passes VM review.
+_APPROVED_RELEASE_FEED_MANIFEST_SHA256S: tuple[str, ...] = (
+    "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
+)
 _APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
 _APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
 _APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
@@ -520,7 +522,7 @@ class Launcher:
             return
         self.release_feed_window = ReleaseFeedDialog(
             self.root, self.theme, options, self.release_feed_closed,
-            approved_manifest_sha256=_APPROVED_RELEASE_FEED_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_RELEASE_FEED_MANIFEST_SHA256S,
         )
 
     def release_feed_closed(self) -> None:

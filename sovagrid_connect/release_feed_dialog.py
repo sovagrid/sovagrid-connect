@@ -12,20 +12,21 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .installer import InstallError
-from .release_feed import ReleaseFeedController, ReleaseFeedState
+from .release_feed import ReleaseFeedController, ReleaseFeedState, approved_manifests
 
 
 class ReleaseFeedDialog:
-    def __init__(self, root, theme, options, on_closed, *, approved_manifest_sha256: str | None):
+    def __init__(self, root, theme, options, on_closed, *,
+                 approved_manifest_sha256: str | tuple[str, ...] | None):
         self.root, self.theme, self.options, self.on_closed = root, theme, options, on_closed
-        self.approved_manifest_sha256 = approved_manifest_sha256
+        self.approved_manifest_sha256s = approved_manifests(approved_manifest_sha256)
         self.controller: ReleaseFeedController | None = None
         self.state: ReleaseFeedState | None = None
         self.events: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
         self.busy = self.closed = False
         self.status = tk.StringVar(value=(
             "Проверка только читает локальное состояние сервера."
-            if approved_manifest_sha256 else "Ожидается проверенный серверный выпуск с подписанным каналом."
+            if self.approved_manifest_sha256s else "Ожидается проверенный серверный выпуск с подписанным каналом."
         ))
         self.window = tk.Toplevel(root)
         self.window.title("Подписанные обновления · SovaGrid Connect")
@@ -72,7 +73,7 @@ class ReleaseFeedDialog:
         actions.grid(row=7, column=0, sticky="w", pady=(10, 0))
         self.check_button = ttk.Button(
             actions, text="Проверить без изменений", command=self.check,
-            state="normal" if approved_manifest_sha256 else "disabled")
+            state="normal" if self.approved_manifest_sha256s else "disabled")
         self.check_button.pack(side="left")
         self.enable_button = ttk.Button(actions, text="Включить канал", command=self.enable,
                                         state="disabled")
@@ -87,7 +88,7 @@ class ReleaseFeedDialog:
     def _controller(self) -> ReleaseFeedController:
         if self.controller is None:
             self.controller = ReleaseFeedController(
-                self.options, approved_manifest_sha256=self.approved_manifest_sha256,
+                self.options, approved_manifest_sha256=self.approved_manifest_sha256s,
                 progress=lambda value: self.events.put(("progress", value)),
             )
         return self.controller
@@ -103,9 +104,9 @@ class ReleaseFeedDialog:
         keys = dict(state.available_keys) if state is not None else {}
         can_change = (state is not None and not self.busy and
                       state.state_revision is not None and
-                      self.approved_manifest_sha256 == state.manifest_sha256)
+                      state.manifest_sha256 in self.approved_manifest_sha256s)
         self.check_button.configure(state=("disabled" if self.busy or
-                                           self.approved_manifest_sha256 is None else "normal"))
+                                           not self.approved_manifest_sha256s else "normal"))
         self.key_selector.configure(state=("readonly" if can_change and
                                            not state.enabled and keys else "disabled"))
         self.enable_button.configure(state=("normal" if can_change and
@@ -155,7 +156,7 @@ class ReleaseFeedDialog:
         self._controls()
 
     def check(self) -> None:
-        if self.busy or self.approved_manifest_sha256 is None:
+        if self.busy or not self.approved_manifest_sha256s:
             return
         self.state = None
         self.busy = True
