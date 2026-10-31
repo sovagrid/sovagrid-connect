@@ -47,20 +47,20 @@ from .auto_update import (AutoUpdatePolicy, AutoUpdatePolicyStore, AutoUpdateErr
                           run_pinned_update, target_id)
 
 
-# Published server-v0.11.0 source bundle. Connect verifies these exact bytes
+# Published server-v0.12.0 source bundle. Connect verifies these exact bytes
 # and the installed source before each root operation; signed discovery stays off.
 _APPROVED_SERVER_SOURCE_SHA256 = PUBLISHED_SERVER_SOURCE_SHA256
-_APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "10abb18ca39d789d3a9cc8bd04d36126f6dd624a81e48219bd814fb6a15ab766"
-_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "10abb18ca39d789d3a9cc8bd04d36126f6dd624a81e48219bd814fb6a15ab766"
-_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
-_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
+_APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "8b14e720188a16c3c27f1e92a357271f9273ae9085b0f21afa9fde1e1d461cd8"
+_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "8b14e720188a16c3c27f1e92a357271f9273ae9085b0f21afa9fde1e1d461cd8"
+_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
+_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
 # Pin only after the signed-feed server bundle and under-lock CAS contract pass VM review.
 _APPROVED_RELEASE_FEED_MANIFEST_SHA256: str | None = None
-_APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
-_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
-_APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
-_APPROVED_HUB_BACKUP_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
-_APPROVED_HOST_BACKUP_MANIFEST_SHA256: str | None = "a0e34d21e059ed6519710b7c441e995f390eca93fdf809aaea7da688d9e67389"
+_APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
+_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
+_APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
+_APPROVED_HUB_BACKUP_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
+_APPROVED_HOST_BACKUP_MANIFEST_SHA256: str | None = "1e971507200735735c949ca977d3e9bd7e2c5256be097fcd1ad61b360ef637c8"
 
 
 class Launcher:
@@ -1123,7 +1123,7 @@ class Launcher:
         def show_source() -> None:
             if source_mode.get() == "release":
                 displayed_bundle.set("Автоматически с GitHub")
-                bundle_info.set("Серверный выпуск 0.11.0: скачивание, проверка SHA-256 и структуры до SSH-передачи.")
+                bundle_info.set("Серверный выпуск 0.12.0: скачивание, проверка SHA-256 и структуры до SSH-передачи.")
             elif bundle.get() and pinned_nearby and Path(bundle.get()).resolve() == suggested[0]:
                 displayed_bundle.set(bundle.get())
                 bundle_info.set("Проверенный пакет рядом с приложением · SHA-256 закреплён в Connect")
