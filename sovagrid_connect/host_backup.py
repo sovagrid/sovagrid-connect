@@ -328,7 +328,8 @@ class HostBackupController:
         return HostBackupOperation(request_id, value["phase"], archive,
                                    value["error"], value["created_at"])
 
-    def _receipt(self, value: object, archive: HostArchive) -> dict:
+    def _receipt(self, value: object, archive: HostArchive,
+                 expected_manifest_sha256: str | None) -> dict:
         keys = {"protocol", "host_archive_id", "host_archive_sha256",
                 "source_manifest_sha256", "images_sha256", "images",
                 "container_ids", "exported_configs", "rootfs_sha256",
@@ -342,7 +343,10 @@ class HostBackupController:
                 value["host_archive_id"] != archive.id or
                 not isinstance(value["host_archive_sha256"], str) or
                 SHA.fullmatch(value["host_archive_sha256"]) is None or
-                value["source_manifest_sha256"] != self.approved_manifest_sha256 or
+                not isinstance(value["source_manifest_sha256"], str) or
+                SHA.fullmatch(value["source_manifest_sha256"]) is None or
+                (expected_manifest_sha256 is not None and
+                 value["source_manifest_sha256"] != expected_manifest_sha256) or
                 not isinstance(value["images_sha256"], str) or
                 SHA.fullmatch(value["images_sha256"]) is None):
             raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
@@ -372,7 +376,8 @@ class HostBackupController:
             raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
         return value
 
-    def _portable_operation(self, value: object, identity: str) -> HostPortableOperation:
+    def _portable_operation(self, value: object, identity: str,
+                            expected_manifest_sha256: str | None) -> HostPortableOperation:
         if (not isinstance(value, dict) or
                 set(value) != {"ok", "protocol", "request_id", "phase", "archive",
                                "error", "created_at", "image_receipt"}):
@@ -385,7 +390,8 @@ class HostBackupController:
         if receipt is not None:
             if operation.archive is None:
                 raise InstallError("Переносимая копия не содержит архив")
-            receipt = self._receipt(receipt, operation.archive)
+            receipt = self._receipt(receipt, operation.archive,
+                                    expected_manifest_sha256)
         return HostPortableOperation(operation, receipt)
 
     def _operation_action(self, action: str, request_id: str | None = None,
@@ -447,23 +453,30 @@ class HostBackupController:
     def saved_request(self) -> HostBackupRequest | None:
         return self.request_store.load(self.options)
 
-    def _saved_mode(self, identity: str, mode: str) -> None:
+    def _saved_mode(self, identity: str, mode: str) -> HostBackupRequest | None:
         current = self.saved_request()
-        if current is not None and current.request_id == identity and (
-                current.mode != mode or
-                current.manifest_sha256 != self.approved_manifest_sha256):
-            raise InstallError("Режим или серверный выпуск сохранённого запроса не совпадает")
+        if current is not None and current.request_id == identity:
+            if current.mode != mode:
+                raise InstallError("Режим сохранённого запроса не совпадает")
+            return current
+        return None
 
     def operation_status(self, request_id: str) -> HostBackupOperation:
         identity = _id(request_id)
-        self._saved_mode(identity, "online")
+        current = self.saved_request()
+        if current is not None and current.request_id == identity:
+            if current.mode == "portable":
+                # Existing dialog polling expects HostBackupOperation. Validate
+                # the portable receipt, then return the familiar status fields.
+                return self.portable_status(identity).operation
         return self._operation(self._operation_action("status", identity), identity)
 
     def portable_status(self, request_id: str) -> HostPortableOperation:
         identity = _id(request_id)
-        self._saved_mode(identity, "portable")
+        current = self._saved_mode(identity, "portable")
         return self._portable_operation(
-            self._operation_action("portable-status", identity), identity)
+            self._operation_action("portable-status", identity), identity,
+            current.manifest_sha256 if current is not None else None)
 
     def saved_operation_status(self) -> HostBackupOperation | HostPortableOperation | None:
         request = self.saved_request()
@@ -593,6 +606,9 @@ class HostBackupController:
 
     def recover_operation(self, request_id: str) -> HostBackupOperation:
         identity = _id(request_id)
+        current = self.saved_request()
+        if current is not None and current.request_id == identity and current.mode == "portable":
+            return self.recover_portable_operation(identity).operation
         before = self.operation_status(identity)
         if before.terminal:
             raise InstallError("Восстановление служб не требуется для этого задания")

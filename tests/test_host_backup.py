@@ -19,6 +19,7 @@ from sovagrid_connect.installer import InstallError
 
 
 MANIFEST = "a" * 64
+NEW_MANIFEST = "e" * 64
 ARCHIVE_ID = "b" * 32
 OTHER_ID = "c" * 32
 RECORD = {"id": ARCHIVE_ID, "created_at": "2026-10-27T12:00:00+00:00",
@@ -55,6 +56,7 @@ class Transport:
         self._privileged = "sudo -n -- "
         self.calls = []
         self.source_valid = True
+        self.source_manifest = MANIFEST
         self.portable_source_valid = True
         self.archives = []
         self.active_units = []
@@ -84,7 +86,7 @@ class Transport:
             portable = command.endswith(" portable")
             if portable and not self.portable_source_valid:
                 return 40, b"SG_HOST_BACKUP_SOURCE_REFUSE:PORTABLE_UNAVAILABLE"
-            answer = {"protocol": 1, "manifest_sha256": MANIFEST,
+            answer = {"protocol": 1, "manifest_sha256": self.source_manifest,
                       "host_backup_verified": True}
             if portable:
                 answer["portable_verified"] = True
@@ -92,16 +94,17 @@ class Transport:
         if " -I /opt/sovagrid-src/sovagrid-blueprint/deploy/host_backup_orchestrator.py " in command:
             action = command.split("host_backup_orchestrator.py ", 1)[1].split(" ", 1)[0]
             if action in ("start", "start-portable"):
-                assert command.endswith(" " + REQUEST_ID + " " + MANIFEST)
+                identity, manifest = command.rsplit(" ", 2)[-2:]
+                assert manifest == self.source_manifest
                 if self.start_refusal:
                     return 40, json.dumps({"ok": False, "protocol": OPERATION_PROTOCOL,
                                            "error": self.start_refusal}).encode()
-                self.operations[REQUEST_ID] = operation()
+                self.operations[identity] = operation(request_id=identity)
                 if action == "start-portable":
-                    self.portable_requests.add(REQUEST_ID)
+                    self.portable_requests.add(identity)
                 if self.start_reply_lost:
                     raise subprocess.TimeoutExpired(command, timeout)
-                return 0, json.dumps(self.operations[REQUEST_ID]).encode()
+                return 0, json.dumps(self.operations[identity]).encode()
             if action == "portable-status":
                 identity = command.rsplit(" ", 1)[-1]
                 if self.portable_status_reply_lost:
@@ -271,8 +274,12 @@ class HostBackupTests(unittest.TestCase):
             raw = (store.directory / (target_id(transport.options) + ".json")).read_text()
             self.assertEqual(json.loads(raw)["format"], 2)
             self.assertIn('"mode":"portable"', raw)
-            with self.assertRaisesRegex(InstallError, "Режим"):
-                controller.operation_status(REQUEST_ID)
+            polled = controller.operation_status(REQUEST_ID)
+            self.assertEqual(polled, started.operation)
+            self.assertTrue(any("host_backup_orchestrator.py portable-status " +
+                                REQUEST_ID in item for item in transport.calls))
+            self.assertFalse(any("host_backup_orchestrator.py status " +
+                                 REQUEST_ID in item for item in transport.calls))
             self.assertEqual(sum("host_backup_orchestrator.py start-portable " in item
                                  for item in transport.calls), 1)
             self.assertTrue(any(item.endswith(" " + MANIFEST + " portable")
@@ -314,6 +321,7 @@ class HostBackupTests(unittest.TestCase):
             resumed = restarted.saved_operation_status()
             self.assertIsInstance(resumed, HostPortableOperation)
             self.assertEqual(resumed.operation.phase, "accepted")
+            self.assertEqual(restarted.operation_status(REQUEST_ID), resumed.operation)
             self.assertEqual(sum("host_backup_orchestrator.py start-portable " in item
                                  for item in transport.calls), 1)
             with self.assertRaisesRegex(InstallError, "незавершённая"):
@@ -332,6 +340,24 @@ class HostBackupTests(unittest.TestCase):
             self.assertEqual(started.operation.phase, "accepted")
             self.assertTrue(any("host_backup_orchestrator.py portable-status " +
                                 REQUEST_ID in item for item in transport.calls))
+
+    def test_saved_portable_recovery_uses_generic_dialog_api(self):
+        transport = Transport()
+        transport.running_containers = ["hub", "web"]
+        transport.recover_reply_lost = True
+        with tempfile.TemporaryDirectory() as temporary:
+            store = HostBackupRequestStore(Path(temporary) / "requests")
+            controller = HostBackupController(
+                transport.options, transport=transport,
+                approved_manifest_sha256=MANIFEST, request_store=store)
+            controller.start_portable(controller.inspect(), REQUEST_ID)
+            resumed = controller.recover_operation(REQUEST_ID)
+            self.assertEqual(resumed.phase, "recovery_requested")
+            self.assertEqual(controller.operation_status(REQUEST_ID), resumed)
+            self.assertEqual(sum("host_backup_orchestrator.py recover " in item
+                                 for item in transport.calls), 1)
+            self.assertFalse(any("host_backup_orchestrator.py status " +
+                                 REQUEST_ID in item for item in transport.calls))
 
     def test_portable_rejects_wrong_receipt_and_wrong_mode(self):
         transport = Transport()
@@ -362,6 +388,8 @@ class HostBackupTests(unittest.TestCase):
                 with self.subTest(receipt=receipt.get("host_archive_id")):
                     with self.assertRaises(InstallError):
                         controller.portable_status(REQUEST_ID)
+                    with self.assertRaises(InstallError):
+                        controller.operation_status(REQUEST_ID)
             large_units = long_units[:24]
             large_receipt = {**RECEIPT, "active_units": large_units,
                              "unit_hashes": {unit: "b" * 64 for unit in large_units}}
@@ -441,8 +469,34 @@ class HostBackupTests(unittest.TestCase):
                 controller.start_portable(controller.inspect(), REQUEST_ID)
             self.assertIsNone(controller.saved_request())
 
+    def test_saved_portable_receipt_and_terminal_replacement_after_upgrade(self):
+        transport = Transport()
+        transport.source_manifest = NEW_MANIFEST
+        transport.running_containers = ["hub", "web"]
+        transport.portable_requests.add(REQUEST_ID)
+        transport.operations[REQUEST_ID] = operation("complete", archive=RECORD)
+        transport.portable_receipt = RECEIPT.copy()
+        with tempfile.TemporaryDirectory() as temporary:
+            store = HostBackupRequestStore(Path(temporary) / "requests")
+            store.save(HostBackupRequest.new(transport.options, REQUEST_ID, MANIFEST,
+                                             mode="portable"))
+            controller = HostBackupController(
+                transport.options, transport=transport,
+                approved_manifest_sha256=NEW_MANIFEST, request_store=store)
+            self.assertEqual(controller.operation_status(REQUEST_ID).phase, "complete")
+            self.assertEqual(controller.portable_status(REQUEST_ID).image_receipt,
+                             RECEIPT)
+            self.assertEqual(controller.verify_portable(REQUEST_ID).image_receipt,
+                             RECEIPT)
+            reviewed = controller.inspect()
+            started = controller.start_online(reviewed, OTHER_ID)
+            self.assertEqual(started.request_id, OTHER_ID)
+            self.assertEqual(controller.saved_request().manifest_sha256, NEW_MANIFEST)
+            self.assertEqual(controller.saved_request().mode, "online")
+
     def test_format_one_saved_request_resumes_as_online_and_migrates_on_write(self):
         transport = Transport()
+        transport.source_manifest = NEW_MANIFEST
         with tempfile.TemporaryDirectory() as temporary:
             store = HostBackupRequestStore(Path(temporary) / "requests")
             store.directory.mkdir(mode=0o700)
@@ -456,10 +510,11 @@ class HostBackupTests(unittest.TestCase):
             transport.operations[REQUEST_ID] = operation()
             controller = HostBackupController(
                 transport.options, transport=transport,
-                approved_manifest_sha256=MANIFEST, request_store=store)
+                approved_manifest_sha256=NEW_MANIFEST, request_store=store)
             self.assertEqual(controller.saved_request().mode, "online")
             self.assertEqual(controller.saved_operation_status().phase, "accepted")
-            replacement = HostBackupRequest.new(transport.options, OTHER_ID, MANIFEST)
+            replacement = HostBackupRequest.new(transport.options, OTHER_ID,
+                                                NEW_MANIFEST)
             store.save(replacement, replacing=REQUEST_ID)
             self.assertEqual(json.loads(marker.read_text())["mode"], "online")
             self.assertEqual(json.loads(marker.read_text())["format"], 2)
