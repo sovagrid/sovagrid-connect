@@ -23,9 +23,9 @@ from .theme import preference_file
 
 PUBLISHED_SERVER_SOURCE_URL = (
     "https://github.com/sovagrid/sovagrid-blueprint/releases/download/"
-    "server-v0.12.0/SovaGrid-server-source.tar.gz"
+    "server-v0.13.0/SovaGrid-server-source.tar.gz"
 )
-PUBLISHED_SERVER_SOURCE_SHA256 = "8b14e720188a16c3c27f1e92a357271f9273ae9085b0f21afa9fde1e1d461cd8"
+PUBLISHED_SERVER_SOURCE_SHA256 = "7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17"
 _ASSET_HOST = "release-assets.githubusercontent.com"
 _ASSET_PREFIX = "/github-production-release-asset/"
 _CHUNK_BYTES = 256 * 1024

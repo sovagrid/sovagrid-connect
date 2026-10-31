@@ -16,8 +16,8 @@ from urllib.request import Request
 
 from sovagrid_connect.installer import InstallError
 from sovagrid_connect.server_bundle_download import (
-    PUBLISHED_SERVER_SOURCE_URL, _ReleaseRedirectHandler, cached_published_server_bundle,
-    downloaded_server_bundle,
+    PUBLISHED_SERVER_SOURCE_SHA256, PUBLISHED_SERVER_SOURCE_URL,
+    _ReleaseRedirectHandler, cached_published_server_bundle, downloaded_server_bundle,
 )
 
 
@@ -47,6 +47,13 @@ class Opener:
 
 
 class ServerBundleDownloadTests(unittest.TestCase):
+    def test_published_release_pin_matches_reviewed_v013_asset(self) -> None:
+        self.assertEqual(PUBLISHED_SERVER_SOURCE_URL,
+                         "https://github.com/sovagrid/sovagrid-blueprint/releases/download/"
+                         "server-v0.13.0/SovaGrid-server-source.tar.gz")
+        self.assertEqual(PUBLISHED_SERVER_SOURCE_SHA256,
+                         "7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17")
+
     def test_verified_update_cache_survives_dialog_and_rechecks_existing_bytes(self) -> None:
         payload = b"published update fixture"
         digest = hashlib.sha256(payload).hexdigest()
