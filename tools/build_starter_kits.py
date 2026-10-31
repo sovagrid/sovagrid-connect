@@ -35,10 +35,70 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def approved_release_pins() -> dict[str, str]:
-    """Read every Starter-related GUI pin without importing Tk."""
-    source = Path(__file__).resolve().parents[1] / "sovagrid_connect" / "gui.py"
+def _valid_pin(value: object) -> bool:
+    return (isinstance(value, str) and len(value) == 64 and
+            all(char in "0123456789abcdef" for char in value))
+
+
+def _published_bundle_pin(package: Path) -> str:
+    """Resolve only the downloader's literal SHA-256, never execute its code."""
+    source = package / "server_bundle_download.py"
     module = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    found: list[str] = []
+    for node in module.body:
+        targets = node.targets if isinstance(node, ast.Assign) else (
+            [node.target] if isinstance(node, ast.AnnAssign) else [])
+        if not any(isinstance(target, ast.Name) and
+                   target.id == "PUBLISHED_SERVER_SOURCE_SHA256" for target in targets):
+            continue
+        if (len(targets) != 1 or not isinstance(targets[0], ast.Name) or
+                not isinstance(node.value, ast.Constant) or
+                not _valid_pin(node.value.value)):
+            raise RuntimeError("Connect downloader has an invalid release pin")
+        found.append(node.value.value)
+    if len(found) != 1:
+        raise RuntimeError("Connect downloader must define one literal release pin")
+    if sum(isinstance(node, ast.Name) and
+           node.id == "PUBLISHED_SERVER_SOURCE_SHA256" and
+           isinstance(node.ctx, (ast.Store, ast.Del))
+           for node in ast.walk(module)) != 1:
+        raise RuntimeError("Connect downloader release pin is shadowed")
+    return found[0]
+
+
+def _trusted_download_import(module: ast.Module) -> bool:
+    """Check the GUI binds the exact downloader name without shadowing it."""
+    bindings: list[bool] = []
+    top_level = {id(node) for node in module.body}
+    for node in ast.walk(module):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    bindings.append(False)
+                elif (alias.asname or alias.name) == "PUBLISHED_SERVER_SOURCE_SHA256":
+                    bindings.append(id(node) in top_level and node.level == 1 and
+                                    node.module == "server_bundle_download" and
+                                    alias.name == "PUBLISHED_SERVER_SOURCE_SHA256" and
+                                    alias.asname is None)
+        elif isinstance(node, ast.Import):
+            if any((alias.asname or alias.name.split(".")[0]) ==
+                   "PUBLISHED_SERVER_SOURCE_SHA256" for alias in node.names):
+                bindings.append(False)
+        elif (isinstance(node, ast.Name) and node.id == "PUBLISHED_SERVER_SOURCE_SHA256" and
+              isinstance(node.ctx, (ast.Store, ast.Del))):
+            bindings.append(False)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and \
+                node.name == "PUBLISHED_SERVER_SOURCE_SHA256":
+            bindings.append(False)
+    return bindings == [True]
+
+
+def approved_release_pins(*, source_root: Path | None = None) -> dict[str, str]:
+    """Read every Starter-related GUI pin without importing Tk or executing code."""
+    package = (source_root or Path(__file__).resolve().parents[1]) / "sovagrid_connect"
+    source = package / "gui.py"
+    module = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    published_pin: str | None = None
     names = {"_APPROVED_SERVER_SOURCE_SHA256", "_APPROVED_PROMOTION_BUNDLE_SHA256",
              "_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256",
              "_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"}
@@ -48,12 +108,20 @@ def approved_release_pins() -> dict[str, str]:
             [node.target] if isinstance(node, ast.AnnAssign) else [])
         for target in targets:
             if isinstance(target, ast.Name) and target.id in names:
-                if (target.id in pins or not isinstance(node.value, ast.Constant) or
-                        not isinstance(node.value.value, str) or
-                        len(node.value.value) != 64 or
-                        any(c not in "0123456789abcdef" for c in node.value.value)):
+                if target.id in pins or len(targets) != 1:
                     raise RuntimeError("Connect GUI has an invalid release pin")
-                pins[target.id] = node.value.value
+                if (target.id == "_APPROVED_SERVER_SOURCE_SHA256" and
+                        isinstance(node.value, ast.Name) and
+                        node.value.id == "PUBLISHED_SERVER_SOURCE_SHA256"):
+                    if not _trusted_download_import(module):
+                        raise RuntimeError("Connect GUI must import the approved downloader pin")
+                    if published_pin is None:
+                        published_pin = _published_bundle_pin(package)
+                    pins[target.id] = published_pin
+                elif isinstance(node.value, ast.Constant) and _valid_pin(node.value.value):
+                    pins[target.id] = node.value.value
+                else:
+                    raise RuntimeError("Connect GUI has an invalid release pin")
     if set(pins) != names:
         raise RuntimeError("Connect GUI is missing a Starter release pin")
     return pins
