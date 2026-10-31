@@ -3,16 +3,25 @@
 # Additional author attribution terms: see ATTRIBUTION.md.
 """Host archives require a pinned root source and unambiguous metadata replies."""
 
+from contextlib import contextmanager
+import hashlib
+import io
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
+from sovagrid_connect import host_backup_transfer as transfer
 from sovagrid_connect.core import ConnectionOptions
 from sovagrid_connect.host_backup import (HostArchive, HostBackupController,
                                           HostPortableOperation)
 from sovagrid_connect.host_backup_request import HostBackupRequest, HostBackupRequestStore
+from sovagrid_connect.host_backup_transfer import STREAM_SCRIPT
 from sovagrid_connect.auto_update import target_id
 from sovagrid_connect.host_backup_remote import SCRIPT
 from sovagrid_connect.installer import InstallError
@@ -159,6 +168,41 @@ class Transport:
                                            "archive": RECORD, "verified": True}
             return 0, json.dumps(answer).encode()
         raise AssertionError(command)
+
+
+class StreamProcess:
+    def __init__(self, payload, returncode=0):
+        self.stdout = io.BytesIO(payload)
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+class StreamManager:
+    def __init__(self, payloads):
+        self.payloads = payloads
+        self.calls = []
+        self._lock = threading.Lock()
+        self._process = None
+
+    @contextmanager
+    def _session(self):
+        yield "pinned-config", "askpass-helper"
+
+    def _ssh(self, config, helper, command):
+        self.calls.append((config, helper, command))
+        _prefix, _manifest, kind, _identity, _size, _sha = command.rsplit(" ", 5)
+        item = self.payloads[kind]
+        process = StreamProcess(*item) if isinstance(item, tuple) else StreamProcess(item)
+        self._process = process
+        return process
 
 
 class HostBackupTests(unittest.TestCase):
@@ -439,7 +483,7 @@ class HostBackupTests(unittest.TestCase):
                 transport.options, transport=transport,
                 approved_manifest_sha256=MANIFEST, request_store=store)
             reviewed = controller.inspect()
-            with self.assertRaisesRegex(InstallError, "проверенным выпуском"):
+            with self.assertRaisesRegex(InstallError, "не поддерживает переносимую копию"):
                 controller.start_portable(reviewed, REQUEST_ID)
             self.assertIsNone(controller.saved_request())
             self.assertFalse(any("host_backup_orchestrator.py start-portable " in item
@@ -452,10 +496,204 @@ class HostBackupTests(unittest.TestCase):
             transport.operations[REQUEST_ID] = operation("complete", archive=RECORD)
             transport.portable_receipt = RECEIPT.copy()
             transport.portable_source_valid = False
-            with self.assertRaisesRegex(InstallError, "проверенным выпуском"):
+            with self.assertRaisesRegex(InstallError, "не поддерживает переносимую копию"):
                 controller.verify_portable(REQUEST_ID)
             self.assertFalse(any("host_image_export.py verify-portable " in item
                                  for item in transport.calls))
+
+    def test_portable_capability_probe_distinguishes_old_source_from_ssh_failure(self):
+        transport = Transport()
+        controller = self.controller(transport)
+        self.assertTrue(controller.portable_available())
+        transport.portable_source_valid = False
+        self.assertFalse(controller.portable_available())
+        transport.source_valid = False
+        with self.assertRaisesRegex(InstallError, "проверенным выпуском"):
+            controller.portable_available()
+        self.assertFalse(self.controller(transport, None).portable_available())
+
+    def test_export_portable_streams_exact_pair_into_private_published_folder(self):
+        host_bytes = b"H" * RECORD["bytes"]
+        image_bytes = b"I" * 4096
+        receipt = {**RECEIPT,
+                   "host_archive_sha256": hashlib.sha256(host_bytes).hexdigest(),
+                   "images_sha256": hashlib.sha256(image_bytes).hexdigest()}
+        transport = Transport()
+        transport.operations[REQUEST_ID] = operation("complete", archive=RECORD)
+        transport.portable_requests.add(REQUEST_ID)
+        transport.portable_receipt = receipt
+        transport.manager = StreamManager({"host": host_bytes, "images": image_bytes})
+        progress = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected = root / "chosen"
+            selected.mkdir()
+            store = HostBackupRequestStore(root / "requests")
+            store.save(HostBackupRequest.new(transport.options, REQUEST_ID, MANIFEST,
+                                             mode="portable"))
+            controller = HostBackupController(
+                transport.options, transport=transport, progress=progress.append,
+                approved_manifest_sha256=MANIFEST, request_store=store)
+            result = controller.export_portable(REQUEST_ID, selected)
+            self.assertEqual(result, selected / ("sovagrid-backup-" + ARCHIVE_ID))
+            self.assertEqual({item.name for item in result.iterdir()},
+                             {"host.tar.gz", "images.tar", "receipt.json"})
+            self.assertEqual((result / "host.tar.gz").read_bytes(), host_bytes)
+            self.assertEqual((result / "images.tar").read_bytes(), image_bytes)
+            self.assertEqual(json.loads((result / "receipt.json").read_text()), receipt)
+            if os.name == "nt":
+                from sovagrid_connect.enrollment_journal import _windows_sid
+                sid = _windows_sid()
+                transfer._windows_verify(result, sid, directory=True)
+                for name in ("host.tar.gz", "images.tar", "receipt.json"):
+                    transfer._windows_verify(result / name, sid)
+            else:
+                self.assertEqual(stat.S_IMODE(result.stat().st_mode), 0o700)
+                self.assertTrue(all(stat.S_IMODE((result / name).stat().st_mode) == 0o600
+                                    for name in ("host.tar.gz", "images.tar", "receipt.json")))
+            self.assertEqual(len(transport.manager.calls), 2)
+            self.assertTrue(all(config == "pinned-config" and helper == "askpass-helper" and
+                                command.startswith("sudo -n -- /usr/bin/python3 -B -I -c ")
+                                for config, helper, command in transport.manager.calls))
+            self.assertIn("Передаём архив образов", " ".join(progress))
+            self.assertIn("source(manifest)", STREAM_SCRIPT)
+            self.assertIn("sovagrid-host-image-exports", STREAM_SCRIPT)
+            compile(STREAM_SCRIPT, "<host-backup-transfer>", "exec")
+
+    def test_export_portable_rejects_corruption_and_cleans_staging(self):
+        host_bytes = b"H" * RECORD["bytes"]
+        image_bytes = b"I" * 4096
+        receipt = {**RECEIPT,
+                   "host_archive_sha256": hashlib.sha256(host_bytes).hexdigest(),
+                   "images_sha256": hashlib.sha256(image_bytes).hexdigest()}
+        for payloads in ({"host": host_bytes, "images": b"X" * 4096},
+                         {"host": host_bytes + b"X", "images": image_bytes},
+                         {"host": host_bytes, "images": (image_bytes, 40)}):
+            transport = Transport()
+            transport.operations[REQUEST_ID] = operation("complete", archive=RECORD)
+            transport.portable_requests.add(REQUEST_ID)
+            transport.portable_receipt = receipt
+            transport.manager = StreamManager(payloads)
+            with self.subTest(payloads=payloads), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                selected = root / "chosen"
+                selected.mkdir()
+                controller = HostBackupController(
+                    transport.options, transport=transport,
+                    approved_manifest_sha256=MANIFEST,
+                    request_store=HostBackupRequestStore(root / "requests"))
+                with self.assertRaises(InstallError):
+                    controller.export_portable(REQUEST_ID, selected)
+                self.assertEqual(list(selected.iterdir()), [])
+
+    def test_export_portable_refuses_existing_or_symlink_destination(self):
+        transport = Transport()
+        transport.operations[REQUEST_ID] = operation("complete", archive=RECORD)
+        transport.portable_requests.add(REQUEST_ID)
+        transport.portable_receipt = RECEIPT.copy()
+        transport.manager = StreamManager({"host": b"H" * RECORD["bytes"],
+                                           "images": b"I" * 4096})
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            selected = root / "chosen"
+            selected.mkdir()
+            final = selected / ("sovagrid-backup-" + ARCHIVE_ID)
+            final.mkdir()
+            controller = HostBackupController(
+                transport.options, transport=transport,
+                approved_manifest_sha256=MANIFEST,
+                request_store=HostBackupRequestStore(root / "requests"))
+            with self.assertRaisesRegex(InstallError, "уже существует"):
+                controller.export_portable(REQUEST_ID, selected)
+            self.assertEqual(len(transport.manager.calls), 0)
+            final.rmdir()
+            try:
+                final.symlink_to(root, target_is_directory=True)
+            except OSError:
+                if os.name == "nt":
+                    return  # Windows may require Developer Mode for symlink creation.
+                raise
+            with self.assertRaisesRegex(InstallError, "уже существует"):
+                controller.export_portable(REQUEST_ID, selected)
+            final.unlink()
+            linked_parent = root / "linked"
+            linked_parent.symlink_to(selected, target_is_directory=True)
+            with self.assertRaisesRegex(InstallError, "обычным каталогом"):
+                controller.export_portable(REQUEST_ID, linked_parent)
+            self.assertEqual(len(transport.manager.calls), 0)
+
+    def test_windows_export_protects_empty_stage_and_files_before_streaming(self):
+        host_bytes = b"H" * RECORD["bytes"]
+        image_bytes = b"I" * 4096
+        receipt = {**RECEIPT,
+                   "host_archive_sha256": hashlib.sha256(host_bytes).hexdigest(),
+                   "images_sha256": hashlib.sha256(image_bytes).hexdigest()}
+        transport = Transport()
+        transport.manager = StreamManager({"host": host_bytes, "images": image_bytes})
+        protected = []
+
+        def protect(path, *, directory=False, sid=None):
+            if directory:
+                self.assertEqual(list(path.iterdir()), [])
+            else:
+                self.assertEqual(path.stat().st_size, 0)
+            protected.append((path.name, directory, sid))
+            return "current-user-sid"
+
+        def publish(stage, final):
+            self.assertFalse(os.path.lexists(final))
+            self.assertEqual({item.name for item in stage.iterdir()},
+                             {"host.tar.gz", "images.tar", "receipt.json"})
+            stage.rename(final)
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            selected = Path(temporary) / "chosen"
+            selected.mkdir()
+            with patch.object(transfer, "_windows_protect", side_effect=protect), \
+                 patch.object(transfer, "_windows_verify"), \
+                 patch.object(transfer, "_windows_publish", side_effect=publish):
+                result = transfer._export_windows(
+                    transport, selected, archive_id=ARCHIVE_ID,
+                    archive_bytes=RECORD["bytes"], image_bytes=4096,
+                    receipt=receipt, raw_receipt=json.dumps(receipt).encode(),
+                    current_manifest_sha256=MANIFEST, progress=lambda _line: None)
+            self.assertEqual(result.name, "sovagrid-backup-" + ARCHIVE_ID)
+            self.assertEqual((result / "host.tar.gz").read_bytes(), host_bytes)
+            self.assertEqual((result / "images.tar").read_bytes(), image_bytes)
+            self.assertTrue(protected[0][0].startswith(".sovagrid-backup-" + ARCHIVE_ID))
+            self.assertEqual([item[0] for item in protected[1:]],
+                             ["host.tar.gz", "images.tar", "receipt.json"])
+            self.assertTrue(protected[0][1])
+            self.assertTrue(all(item[2] == "current-user-sid" for item in protected[1:]))
+
+    def test_windows_export_cleans_failed_transfer_and_refuses_reparse_parent(self):
+        host_bytes = b"H" * RECORD["bytes"]
+        image_bytes = b"I" * 4096
+        receipt = {**RECEIPT,
+                   "host_archive_sha256": hashlib.sha256(host_bytes).hexdigest(),
+                   "images_sha256": hashlib.sha256(image_bytes).hexdigest()}
+        transport = Transport()
+        transport.manager = StreamManager({"host": host_bytes, "images": b"X" * 4096})
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            root = Path(temporary)
+            selected = root / "chosen"
+            selected.mkdir()
+            with patch.object(transfer, "_windows_protect",
+                              return_value="current-user-sid"), \
+                 patch.object(transfer, "_windows_verify"), \
+                 patch.object(transfer, "_windows_publish") as publish:
+                with self.assertRaises(InstallError):
+                    transfer._export_windows(
+                        transport, selected, archive_id=ARCHIVE_ID,
+                        archive_bytes=RECORD["bytes"], image_bytes=4096,
+                        receipt=receipt, raw_receipt=json.dumps(receipt).encode(),
+                        current_manifest_sha256=MANIFEST, progress=lambda _line: None)
+                publish.assert_not_called()
+            self.assertEqual(list(selected.iterdir()), [])
+            linked = root / "linked"
+            linked.symlink_to(selected, target_is_directory=True)
+            with self.assertRaisesRegex(InstallError, "ссылку"):
+                transfer._windows_destination(linked)
 
     def test_portable_definite_start_refusal_clears_its_marker(self):
         transport = Transport()

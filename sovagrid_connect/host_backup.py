@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import json
+from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -16,6 +17,7 @@ from typing import Callable
 from .core import ConnectionOptions
 from .host_backup_remote import SCRIPT
 from .host_backup_request import HostBackupRequest, HostBackupRequestStore
+from .host_backup_transfer import export_portable_files
 from .hub_backup import _object
 from .installer import InstallError
 from .promotion import PromotionController
@@ -168,6 +170,11 @@ class HostBackupController:
                    (" portable" if portable else ""))
         code, raw = self.transport._execute(command, timeout=120)
         if code != 0:
+            if (portable and code == 40 and
+                    raw.strip() == b"SG_HOST_BACKUP_SOURCE_REFUSE:PORTABLE_UNAVAILABLE"):
+                raise HostBackupRejected(
+                    "PORTABLE_UNAVAILABLE",
+                    "Серверный выпуск ещё не поддерживает переносимую копию")
             raise InstallError("Установленный серверный пакет не совпал с проверенным выпуском")
         value = _object(raw, 1024)
         keys = {"protocol", "manifest_sha256", "host_backup_verified"}
@@ -179,6 +186,17 @@ class HostBackupController:
                 value["host_backup_verified"] is not True or
                 (portable and value["portable_verified"] is not True)):
             raise InstallError("Установленный серверный пакет не совпал с проверенным выпуском")
+
+    def portable_available(self) -> bool:
+        if self.approved_manifest_sha256 is None:
+            return False
+        try:
+            self._source(portable=True)
+        except HostBackupRejected as exc:
+            if exc.code == "PORTABLE_UNAVAILABLE":
+                return False
+            raise
+        return True
 
     @staticmethod
     def _archive(value: object, *, verified: bool) -> HostArchive:
@@ -530,6 +548,18 @@ class HostBackupController:
             raise InstallError("Сервер прислал неверный результат проверки переносимой копии")
         return HostPortablePair(operation, archive, receipt,
                                 value["image_count"], value["bytes"], platforms)
+
+    def export_portable(self, request_id: str, destination: Path) -> Path:
+        self.progress("Проверяем пару архивов перед передачей…")
+        pair = self.verify_portable(request_id)
+        if self.approved_manifest_sha256 is None:
+            raise InstallError("Переносимая копия ждёт проверенный серверный выпуск")
+        return export_portable_files(
+            self.transport, destination, archive_id=pair.archive.id,
+            archive_bytes=pair.archive.bytes, image_bytes=pair.image_bytes,
+            receipt=pair.image_receipt,
+            current_manifest_sha256=self.approved_manifest_sha256,
+            progress=self.progress)
 
     def start_online(self, reviewed: HostBackupState, request_id: str) -> HostBackupOperation:
         identity = _id(request_id)
