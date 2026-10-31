@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import json
 import re
 import shlex
 import subprocess
@@ -22,12 +23,19 @@ from .promotion import PromotionController
 
 PROTOCOL = "sovagrid-host-backup-v1"
 OPERATION_PROTOCOL = "sovagrid-host-backup-operation-v1"
+IMAGE_PROTOCOL = "sovagrid-host-images-v1"
+PORTABLE_RECEIPT_PROTOCOL = "sovagrid-portable-host-receipt-v1"
 SHA = re.compile(r"[0-9a-f]{64}\Z")
+IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 ARCHIVE_ID = re.compile(r"[0-9a-f]{32}\Z")
 UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?\+00:00\Z")
 MAX_ARCHIVES = 100
 MAX_BYTES = 8 * 1024**3
 MAX_FILES = 20_000
+MAX_PORTABLE_RECEIPT = 8192
+PORTABLE_REPLY_LIMIT = 12288
+PORTABLE_SERVICES = (frozenset(("hub", "web")),
+                     frozenset(("hub", "web", "ssh-gateway")))
 OPERATION_PHASES = frozenset(("accepted", "stopping", "archiving", "restarting",
                               "complete", "recovery_requested", "recovered", "failed",
                               "recovery_required"))
@@ -111,6 +119,22 @@ class HostBackupOperation:
         return self.phase in TERMINAL_PHASES
 
 
+@dataclass(frozen=True)
+class HostPortableOperation:
+    operation: HostBackupOperation
+    image_receipt: dict | None
+
+
+@dataclass(frozen=True)
+class HostPortablePair:
+    operation: HostBackupOperation
+    archive: HostArchive
+    image_receipt: dict
+    image_count: int
+    image_bytes: int
+    platforms: dict[str, dict[str, str]]
+
+
 class HostBackupRejected(InstallError):
     """A structured server refusal before the requested mutation was accepted."""
 
@@ -134,21 +158,26 @@ class HostBackupController:
         self.progress = progress or (lambda _message: None)
         self.request_store = request_store or HostBackupRequestStore.default()
 
-    def _source(self) -> None:
+    def _source(self, *, portable: bool = False) -> None:
         expected = self.approved_manifest_sha256
         if expected is None:
             raise InstallError("Полная копия ждёт общий проверенный серверный выпуск")
         self.transport._verify_root_access()
         command = (self.transport._privileged + "/usr/bin/python3 -B -I -c " +
-                   shlex.quote(SCRIPT) + " " + expected)
+                   shlex.quote(SCRIPT) + " " + expected +
+                   (" portable" if portable else ""))
         code, raw = self.transport._execute(command, timeout=120)
         if code != 0:
             raise InstallError("Установленный серверный пакет не совпал с проверенным выпуском")
         value = _object(raw, 1024)
-        if (set(value) != {"protocol", "manifest_sha256", "host_backup_verified"} or
+        keys = {"protocol", "manifest_sha256", "host_backup_verified"}
+        if portable:
+            keys.add("portable_verified")
+        if (set(value) != keys or
                 type(value["protocol"]) is not int or value["protocol"] != 1 or
                 value["manifest_sha256"] != expected or
-                value["host_backup_verified"] is not True):
+                value["host_backup_verified"] is not True or
+                (portable and value["portable_verified"] is not True)):
             raise InstallError("Установленный серверный пакет не совпал с проверенным выпуском")
 
     @staticmethod
@@ -299,23 +328,87 @@ class HostBackupController:
         return HostBackupOperation(request_id, value["phase"], archive,
                                    value["error"], value["created_at"])
 
-    def _operation_action(self, action: str, request_id: str | None = None) -> dict:
-        if action not in ("start", "status", "recover", "list") or (
+    def _receipt(self, value: object, archive: HostArchive) -> dict:
+        keys = {"protocol", "host_archive_id", "host_archive_sha256",
+                "source_manifest_sha256", "images_sha256", "images",
+                "container_ids", "exported_configs", "rootfs_sha256",
+                "active_units", "unit_hashes"}
+        if not isinstance(value, dict) or set(value) != keys:
+            raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        receipt_bytes = len(json.dumps(value, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8")) + 1
+        if (receipt_bytes > MAX_PORTABLE_RECEIPT or
+                value["protocol"] != PORTABLE_RECEIPT_PROTOCOL or
+                value["host_archive_id"] != archive.id or
+                not isinstance(value["host_archive_sha256"], str) or
+                SHA.fullmatch(value["host_archive_sha256"]) is None or
+                value["source_manifest_sha256"] != self.approved_manifest_sha256 or
+                not isinstance(value["images_sha256"], str) or
+                SHA.fullmatch(value["images_sha256"]) is None):
+            raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        services = value["images"]
+        if (not isinstance(services, dict) or frozenset(services) not in PORTABLE_SERVICES or
+                any(not isinstance(item, str) or IMAGE_ID.fullmatch(item) is None
+                    for item in services.values()) or
+                len(set(services.values())) != len(services)):
+            raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        for key, pattern in (("container_ids", SHA), ("exported_configs", IMAGE_ID),
+                             ("rootfs_sha256", SHA)):
+            entries = value[key]
+            if (not isinstance(entries, dict) or set(entries) != set(services) or
+                    any(not isinstance(item, str) or pattern.fullmatch(item) is None
+                        for item in entries.values())):
+                raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        if len(set(value["exported_configs"].values())) != len(services):
+            raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        units = value["active_units"]
+        hashes = value["unit_hashes"]
+        if (not isinstance(units, list) or len(units) > 32 or
+                any(not isinstance(item, str) or UNIT.fullmatch(item) is None
+                    for item in units) or len(set(units)) != len(units) or
+                not isinstance(hashes, dict) or set(hashes) != set(units) or
+                any(not isinstance(item, str) or SHA.fullmatch(item) is None
+                    for item in hashes.values())):
+            raise InstallError("Сервер прислал неверную квитанцию переносимой копии")
+        return value
+
+    def _portable_operation(self, value: object, identity: str) -> HostPortableOperation:
+        if (not isinstance(value, dict) or
+                set(value) != {"ok", "protocol", "request_id", "phase", "archive",
+                               "error", "created_at", "image_receipt"}):
+            raise InstallError("Сервер прислал неверное состояние переносимой копии")
+        operation = self._operation({key: item for key, item in value.items()
+                                     if key != "image_receipt"}, identity)
+        receipt = value["image_receipt"]
+        if (operation.phase == "complete") != (receipt is not None):
+            raise InstallError("Сервер прислал неверное состояние переносимой копии")
+        if receipt is not None:
+            if operation.archive is None:
+                raise InstallError("Переносимая копия не содержит архив")
+            receipt = self._receipt(receipt, operation.archive)
+        return HostPortableOperation(operation, receipt)
+
+    def _operation_action(self, action: str, request_id: str | None = None,
+                          *, portable: bool = False) -> dict:
+        if action not in ("start", "start-portable", "status", "portable-status",
+                           "recover", "list") or (
                 request_id is None) != (action == "list"):
             raise InstallError("Недопустимое действие с заданием полной копии")
-        self._source()
+        self._source(portable=portable or action in ("start-portable", "portable-status"))
         arguments = " " + action
         if request_id is not None:
             arguments += " " + _id(request_id)
-        if action == "start":
+        if action in ("start", "start-portable"):
             if self.approved_manifest_sha256 is None:
                 raise InstallError("Задание ждёт проверенный серверный выпуск")
             arguments += " " + self.approved_manifest_sha256
         command = (self.transport._privileged + "/usr/bin/python3 -B -I " +
                    "/opt/sovagrid-src/sovagrid-blueprint/deploy/host_backup_orchestrator.py" +
                    arguments)
-        maximum = 98304 if action == "list" else 4096
-        code, raw = self.transport._execute(command, timeout=90 if action == "start" else 60,
+        maximum = (98304 if action == "list" else
+                   PORTABLE_REPLY_LIMIT if action == "portable-status" else 4096)
+        code, raw = self.transport._execute(command, timeout=90 if action in
+                                            ("start", "start-portable") else 60,
                                             limit=maximum)
         value = _object(raw, maximum)
         if value.get("protocol") != OPERATION_PROTOCOL or type(value.get("ok")) is not bool:
@@ -332,12 +425,53 @@ class HostBackupController:
             raise HostBackupRejected(error, ERRORS.get(error, "Сервер отказал в задании полной копии."))
         return value
 
+    def _verify_portable_images(self, archive_id: str) -> dict:
+        self._source(portable=True)
+        command = (self.transport._privileged + "/usr/bin/python3 -B -I " +
+                   "/opt/sovagrid-src/sovagrid-blueprint/deploy/host_image_export.py " +
+                   "verify-portable " + _id(archive_id))
+        code, raw = self.transport._execute(command, timeout=2400,
+                                            limit=PORTABLE_REPLY_LIMIT)
+        value = _object(raw, PORTABLE_REPLY_LIMIT)
+        if value.get("protocol") != IMAGE_PROTOCOL or type(value.get("ok")) is not bool:
+            raise InstallError("Сервер прислал неверный ответ о переносимой копии")
+        if code != 0 or value["ok"] is not True:
+            error = value.get("error")
+            if (set(value) != {"ok", "protocol", "error"} or value["ok"] is not False or
+                    not isinstance(error, str) or OPERATION_ERROR.fullmatch(error) is None):
+                raise InstallError("Сервер не подтвердил проверку переносимой копии")
+            raise HostBackupRejected(error, ERRORS.get(error,
+                "Сервер отказал в проверке переносимой копии."))
+        return value
+
     def saved_request(self) -> HostBackupRequest | None:
         return self.request_store.load(self.options)
 
+    def _saved_mode(self, identity: str, mode: str) -> None:
+        current = self.saved_request()
+        if current is not None and current.request_id == identity and (
+                current.mode != mode or
+                current.manifest_sha256 != self.approved_manifest_sha256):
+            raise InstallError("Режим или серверный выпуск сохранённого запроса не совпадает")
+
     def operation_status(self, request_id: str) -> HostBackupOperation:
         identity = _id(request_id)
+        self._saved_mode(identity, "online")
         return self._operation(self._operation_action("status", identity), identity)
+
+    def portable_status(self, request_id: str) -> HostPortableOperation:
+        identity = _id(request_id)
+        self._saved_mode(identity, "portable")
+        return self._portable_operation(
+            self._operation_action("portable-status", identity), identity)
+
+    def saved_operation_status(self) -> HostBackupOperation | HostPortableOperation | None:
+        request = self.saved_request()
+        if request is None:
+            return None
+        if request.mode == "portable":
+            return self.portable_status(request.request_id)
+        return self.operation_status(request.request_id)
 
     def operation_list(self) -> tuple[HostBackupOperation, ...]:
         value = self._operation_action("list")
@@ -350,6 +484,40 @@ class HostBackupController:
             raise InstallError("Сервер прислал повторяющиеся задания")
         return operations
 
+    def verify_portable(self, request_id: str) -> HostPortablePair:
+        status = self.portable_status(request_id)
+        operation = status.operation
+        receipt = status.image_receipt
+        if operation.phase != "complete" or operation.archive is None or receipt is None:
+            raise InstallError("Переносимая копия ещё не завершена")
+        archive = self.verify(operation.archive.id)
+        if (archive.id, archive.created_at, archive.layout, archive.bytes,
+                archive.files) != (operation.archive.id, operation.archive.created_at,
+                                  operation.archive.layout, operation.archive.bytes,
+                                  operation.archive.files):
+            raise InstallError("Архив переносимой копии не совпал с заданием")
+        value = self._verify_portable_images(archive.id)
+        platforms = value.get("platforms")
+        if (set(value) != {"ok", "protocol", "id", "verified", "image_count",
+                           "bytes", "apply_available", "receipt", "platforms"} or
+                value["id"] != archive.id or value["verified"] is not True or
+                type(value["image_count"]) is not int or
+                value["image_count"] != len(receipt["images"]) or
+                type(value["bytes"]) is not int or
+                not 0 < value["bytes"] <= MAX_BYTES or
+                value["apply_available"] is not False or
+                value["receipt"] != receipt or
+                not isinstance(platforms, dict) or
+                set(platforms) != set(receipt["images"]) or
+                any(not isinstance(item, dict) or
+                    set(item) != {"os", "architecture"} or
+                    item["os"] != "linux" or
+                    item["architecture"] not in ("amd64", "arm64")
+                    for item in platforms.values())):
+            raise InstallError("Сервер прислал неверный результат проверки переносимой копии")
+        return HostPortablePair(operation, archive, receipt,
+                                value["image_count"], value["bytes"], platforms)
+
     def start_online(self, reviewed: HostBackupState, request_id: str) -> HostBackupOperation:
         identity = _id(request_id)
         if (reviewed.options != self.options or
@@ -358,8 +526,10 @@ class HostBackupController:
             raise InstallError("План или серверный пакет изменились. Обновите список")
         current = self.saved_request()
         if current is not None:
-            previous = self.operation_status(current.request_id)
-            if not previous.terminal:
+            previous = self.saved_operation_status()
+            if isinstance(previous, HostPortableOperation):
+                previous = previous.operation
+            if previous is not None and not previous.terminal:
                 raise InstallError("На этом SSH-маршруте есть незавершённая полная копия. "
                                    "Проверьте её состояние")
         marker = HostBackupRequest.new(self.options, identity, self.approved_manifest_sha256)
@@ -382,6 +552,45 @@ class HostBackupController:
                 raise InstallError("Ответ о запуске потерян. Запрос сохранён; проверьте его "
                                    "состояние, не запускайте новую копию") from exc
 
+    def start_portable(self, reviewed: HostBackupState,
+                       request_id: str) -> HostPortableOperation:
+        identity = _id(request_id)
+        if (reviewed.options != self.options or
+                reviewed.manifest_sha256 != self.approved_manifest_sha256 or
+                self.inspect() != reviewed):
+            raise InstallError("План или серверный пакет изменились. Обновите список")
+        # Check the portable commands before writing a marker. An installed
+        # legacy bundle can still pass the ordinary archive source proof.
+        self._source(portable=True)
+        current = self.saved_request()
+        if current is not None:
+            previous = self.saved_operation_status()
+            if isinstance(previous, HostPortableOperation):
+                previous = previous.operation
+            if previous is not None and not previous.terminal:
+                raise InstallError("На этом SSH-маршруте есть незавершённая полная копия. "
+                                   "Проверьте её состояние")
+        marker = HostBackupRequest.new(self.options, identity,
+                                       self.approved_manifest_sha256, mode="portable")
+        self.request_store.save(marker, replacing=current.request_id if current else None)
+        self.progress("Задание переносимой копии сохранено; сервер подготовит пару архивов…")
+        try:
+            value = self._operation_action("start-portable", identity)
+            operation = self._operation(value, identity)
+            if operation.phase == "complete":
+                return self.portable_status(identity)
+            return HostPortableOperation(operation, None)
+        except HostBackupRejected:
+            if self.saved_request() == marker:
+                self.request_store.clear(marker)
+            raise
+        except (InstallError, OSError, subprocess.TimeoutExpired) as exc:
+            try:
+                return self.portable_status(identity)
+            except (InstallError, OSError, subprocess.TimeoutExpired):
+                raise InstallError("Ответ о запуске потерян. Запрос сохранён; проверьте его "
+                                   "состояние, не запускайте новую копию") from exc
+
     def recover_operation(self, request_id: str) -> HostBackupOperation:
         identity = _id(request_id)
         before = self.operation_status(identity)
@@ -393,6 +602,22 @@ class HostBackupController:
         except (InstallError, OSError, subprocess.TimeoutExpired) as exc:
             try:
                 return self.operation_status(identity)
+            except (InstallError, OSError, subprocess.TimeoutExpired):
+                raise InstallError("Ответ о восстановлении служб потерян. Запрос сохранён; "
+                                   "проверьте его состояние, не повторяйте действие вслепую") from exc
+
+    def recover_portable_operation(self, request_id: str) -> HostPortableOperation:
+        identity = _id(request_id)
+        before = self.portable_status(identity)
+        if before.operation.terminal:
+            raise InstallError("Восстановление служб не требуется для этого задания")
+        self.progress("Сервер запускает только службы, остановленные для этой копии…")
+        try:
+            self._operation(self._operation_action("recover", identity, portable=True), identity)
+            return self.portable_status(identity)
+        except (InstallError, OSError, subprocess.TimeoutExpired) as exc:
+            try:
+                return self.portable_status(identity)
             except (InstallError, OSError, subprocess.TimeoutExpired):
                 raise InstallError("Ответ о восстановлении служб потерян. Запрос сохранён; "
                                    "проверьте его состояние, не повторяйте действие вслепую") from exc

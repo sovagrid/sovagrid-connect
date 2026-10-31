@@ -40,21 +40,23 @@ class HostBackupRequest:
     request_id: str
     manifest_sha256: str
     created_at: int
+    mode: str
 
     def validated(self) -> "HostBackupRequest":
-        if (type(self.format) is not int or self.format != 1 or
+        if (type(self.format) is not int or self.format != 2 or
                 not isinstance(self.target_id, str) or SHA.fullmatch(self.target_id) is None or
                 not isinstance(self.request_id, str) or REQUEST.fullmatch(self.request_id) is None or
                 not isinstance(self.manifest_sha256, str) or SHA.fullmatch(self.manifest_sha256) is None or
-                type(self.created_at) is not int or not 1 <= self.created_at <= 253402300799):
+                type(self.created_at) is not int or not 1 <= self.created_at <= 253402300799 or
+                self.mode not in ("online", "portable")):
             raise InstallError("Сохранённый запрос полной копии повреждён")
         return self
 
     @classmethod
     def new(cls, options: ConnectionOptions, request_id: str,
-            manifest_sha256: str) -> "HostBackupRequest":
-        return cls(1, target_id(options), request_id, manifest_sha256,
-                   int(time.time())).validated()
+            manifest_sha256: str, *, mode: str = "online") -> "HostBackupRequest":
+        return cls(2, target_id(options), request_id, manifest_sha256,
+                   int(time.time()), mode).validated()
 
 
 class HostBackupRequestStore:
@@ -159,9 +161,17 @@ class HostBackupRequestStore:
             raise InstallError("Сохранённый запрос полной копии слишком велик")
         try:
             value = json.loads(raw, object_pairs_hook=_unique)
-            if not isinstance(value, dict) or set(value) != set(HostBackupRequest.__dataclass_fields__):
+            if not isinstance(value, dict):
                 raise ValueError("shape")
-            request = HostBackupRequest(**value).validated()
+            if set(value) == set(HostBackupRequest.__dataclass_fields__):
+                request = HostBackupRequest(**value).validated()
+            elif (set(value) == set(HostBackupRequest.__dataclass_fields__) - {"mode"} and
+                  type(value["format"]) is int and value["format"] == 1):
+                # Format 1 had only online jobs. Its exact shape is converted
+                # on read; the next write persists the format 2 mode field.
+                request = HostBackupRequest(**{**value, "format": 2, "mode": "online"}).validated()
+            else:
+                raise ValueError("shape")
         except (TypeError, ValueError, UnicodeError) as exc:
             raise InstallError("Сохранённый запрос полной копии повреждён") from exc
         if request.target_id != key:
