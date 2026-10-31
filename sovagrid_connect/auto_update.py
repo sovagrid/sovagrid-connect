@@ -241,6 +241,8 @@ def run_pinned_update(
         return AutoUpdateOutcome("disabled", policy.archive_sha256, policy.expected_current_manifest)
     if not policy.due(now):
         return AutoUpdateOutcome("outside_window", policy.archive_sha256, policy.expected_current_manifest)
+    if getattr(installer, "automatic_apply_supported", True) is False:
+        raise AutoUpdateError("Применение при простое через Connect пока недоступно; старое локальное разрешение выключено")
     archive = Path(policy.archive_path)
     _verify_archive_pin(archive, policy.archive_sha256)
     preview = installer.preview_update(archive, expected_sha256=policy.archive_sha256)

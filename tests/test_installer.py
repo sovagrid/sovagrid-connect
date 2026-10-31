@@ -787,7 +787,7 @@ class InstallTests(unittest.TestCase):
             self.assertNotIn("sample-secret", "\n".join(progress))
 
     @patch("sovagrid_connect.installer.helper_path", return_value="fixture-askpass")
-    def test_automatic_apply_uses_idle_gated_remote_mode(self, _helper) -> None:
+    def test_automatic_apply_refuses_before_ssh(self, _helper) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fake_ssh = Path(directory, "fake_ssh.py")
             fake_ssh.write_text(FAKE_SSH)
@@ -796,10 +796,9 @@ class InstallTests(unittest.TestCase):
                 popen=lambda argv, **kwargs: subprocess.Popen([sys.executable, str(fake_ssh), *argv[1:]], **kwargs),
             )
             prepared = PreparedUpdate(None, "a" * 64, "/opt/sovagrid-candidates/" + "a" * 64, False)
-            with self.assertRaisesRegex(InstallError, "автоматическое обновление отложено"):
+            with self.assertRaisesRegex(InstallError, "пока недоступно"):
                 manager.apply_automatic_update(prepared, expected_current_manifest="b" * 64)
-            self.assertEqual(fake_ssh.with_suffix(".auto_command").read_text(),
-                             "python3 - apply-auto " + "a" * 64 + " " + "b" * 64)
+            self.assertFalse(fake_ssh.with_suffix(".auto_command").exists())
 
     @patch("sovagrid_connect.installer.helper_path", return_value="fixture-askpass")
     def test_server_timer_arms_exact_prepared_pin_and_reads_status(self, _helper) -> None:

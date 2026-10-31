@@ -44,7 +44,7 @@ from .vpn_setup_dialog import RoutingDialog, AmneziaDialog
 from .promotion import verify_promoted_panel
 from .server_status import ServerStatus
 from .ssh_grant import LoopbackGrantBroker
-from .auto_update import (AutoUpdatePolicy, AutoUpdatePolicyStore, AutoUpdateError,
+from .auto_update import (AutoUpdatePolicyStore, AutoUpdateError,
                           run_pinned_update, target_id)
 
 
@@ -1646,43 +1646,7 @@ class Launcher:
                                               state="disabled")
         self.update_apply_button.pack(side="left", padx=(8, 0))
 
-        def approve_automatic() -> None:
-            preview, prepared = self.update_preview, self.update_prepared
-            if (self.installing or preview is None or prepared is None or self.update_source_path is None or
-                    preview.sha256 != prepared.sha256):
-                return
-            if not messagebox.askyesno(
-                "Применить при простое",
-                f"Этот сервер: {options.host}\nSHA-256 пакета: {prepared.sha256}\n\n"
-                "Разрешить Connect применить только этот пакет, если нет активных сеансов и заданий? "
-                "Connect должен оставаться открытым с выбранным SSH-сервером. "
-                "После успешного применения разрешение выключится. Работа Hub кратко прервётся.",
-                parent=window,
-            ):
-                return
-            try:
-                policy = AutoUpdatePolicy.approve(
-                    options, self.update_source_path, prepared.sha256,
-                    preview.current_manifest_sha256, enabled=True,
-                )
-                self._auto_policy_store().save(policy)
-            except (OSError, ValueError, AutoUpdateError) as exc:
-                messagebox.showerror("Применить при простое", str(exc), parent=window)
-                return
-            self.update_auto_button.configure(state="disabled")
-            self.update_apply_button.configure(state="disabled")
-            self.update_status.set("Точный пакет одобрен; Connect попробует применить его при простое сервера")
-            messagebox.showinfo(
-                "Применить при простое",
-                "Одобрение сохранено только для этого SSH-сервера и точного SHA-256. "
-                "Закройте это окно и оставьте Connect открытым; проверка запускается каждые пять минут.",
-                parent=window,
-            )
-
-        self.update_auto_button = ttk.Button(
-            controls, text="Применить при простое", command=approve_automatic, state="disabled",
-        )
-        self.update_auto_button.pack(side="left", padx=(8, 0))
+        self.update_auto_button = None
         ttk.Button(controls, text="Закрыть", command=self.close_update).pack(side="left", padx=(8, 0))
 
         server_controls = ttk.LabelFrame(body, text="Автообновление на самом сервере", padding=10)

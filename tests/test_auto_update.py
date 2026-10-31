@@ -98,6 +98,13 @@ class AutoUpdateTests(unittest.TestCase):
             run_pinned_update(self.policy(), self.options, installer, now=self.now)
         self.assertEqual([event[0] for event in installer.events], ["preview"])
 
+    def test_unsupported_local_auto_apply_refuses_before_staging(self):
+        installer = InstallerFixture(self.digest, self.manifest, self.options, automatic=True)
+        installer.automatic_apply_supported = False
+        with self.assertRaisesRegex(AutoUpdateError, "пока недоступно"):
+            run_pinned_update(self.policy(), self.options, installer, now=self.now)
+        self.assertEqual(installer.events, [])
+
     def test_old_client_only_stages_and_new_idle_gated_client_applies(self):
         installer = InstallerFixture(self.digest, self.manifest, self.options)
         self.assertEqual(run_pinned_update(self.policy(), self.options, installer, now=self.now).status,
