@@ -48,28 +48,30 @@ from .auto_update import (AutoUpdatePolicyStore, AutoUpdateError,
                           run_pinned_update, target_id)
 
 
-# Published server-v0.14.0 source bundle. Connect verifies these exact bytes
+# Published server-v0.14.1 source bundle. Connect verifies these exact bytes
 # and the installed source before each root operation.
 _APPROVED_SERVER_SOURCE_SHA256 = PUBLISHED_SERVER_SOURCE_SHA256
-_APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9"
-_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9"
-_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
-_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+_APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "c5786bb64467063196046144e665a98e347f40713facb37809b65a03eb70f347"
+_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "c5786bb64467063196046144e665a98e347f40713facb37809b65a03eb70f347"
+_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
+_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
 # Extend this allowlist only after each signed-feed server bundle passes VM review.
 _APPROVED_RELEASE_FEED_MANIFEST_SHA256S: tuple[str, ...] = (
     "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
     "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
+    "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f",
 )
-_APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
-_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
-_APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
-_APPROVED_HUB_BACKUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
-_APPROVED_HOST_BACKUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
-# Advanced actions have the same reviewed remote contract in both releases.
+_APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
+_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
+_APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
+_APPROVED_HUB_BACKUP_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
+_APPROVED_HOST_BACKUP_MANIFEST_SHA256: str | None = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
+# Advanced actions have the same reviewed remote contract in these releases.
 # Keep this list separate from the feed: a new signed release needs a new review.
 _APPROVED_ADVANCED_MANIFEST_SHA256S: tuple[str, ...] = (
     "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
     "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
+    "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f",
 )
 
 

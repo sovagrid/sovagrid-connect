@@ -43,7 +43,7 @@ class StarterPinTests(unittest.TestCase):
         self.assertEqual(pins["_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256"],
                          PUBLISHED_SERVER_SOURCE_SHA256)
         self.assertEqual(pins["_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"],
-                         "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286")
+                         "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f")
 
     def test_starter_manifest_is_in_runtime_advanced_allowlist(self) -> None:
         source = Path(__file__).resolve().parents[1] / "sovagrid_connect/gui.py"
@@ -55,6 +55,7 @@ class StarterPinTests(unittest.TestCase):
         approved = ast.literal_eval(assignments[0].value)
         self.assertEqual(approved, (
             "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
+            "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
             approved_release_pins()["_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"],
         ))
 
