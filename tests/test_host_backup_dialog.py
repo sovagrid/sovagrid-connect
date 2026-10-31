@@ -13,7 +13,7 @@ from unittest import mock
 
 from sovagrid_connect.core import ConnectionOptions
 from sovagrid_connect.host_backup import (HostArchive, HostBackupOperation,
-                                          HostBackupPlan, HostBackupState,
+                                          HostBackupPlan, HostBackupRejected, HostBackupState,
                                           HostPortableOperation, HostPortablePair)
 
 try:
@@ -89,6 +89,28 @@ class Controller:
         return False
 
 
+class ModeController:
+    def __init__(self, operation, *, saved=None, portable_error=None):
+        self.operation = operation
+        self.saved = saved
+        self.portable_error = portable_error
+        self.calls = []
+
+    def saved_request(self):
+        self.calls.append(("saved",))
+        return self.saved
+
+    def portable_status(self, identity):
+        self.calls.append(("portable", identity))
+        if self.portable_error is not None:
+            raise self.portable_error
+        return HostPortableOperation(self.operation, None)
+
+    def operation_status(self, identity):
+        self.calls.append(("ordinary", identity))
+        return self.operation
+
+
 def fixture():
     dialog = dialog_module.HostBackupDialog.__new__(dialog_module.HostBackupDialog)
     dialog.options = ConnectionOptions("hub.example.invalid", "root")
@@ -130,6 +152,46 @@ def completed_pair():
 
 
 class HostBackupDialogTest(unittest.TestCase):
+    def test_older_portable_history_survives_newer_saved_marker(self):
+        dialog, tasks = fixture()
+        operation = completed_pair().operation
+        controller = ModeController(operation, saved=types.SimpleNamespace(
+            request_id="f" * 32, mode="online"))
+        dialog._controller = lambda: controller
+        dialog.request_id = REQUEST
+        dialog.check_operation()
+        self.assertEqual(tasks[0][0], "operation")
+        mode, received = tasks[0][1]()
+        self.assertTrue(mode)
+        self.assertIs(received, operation)
+        self.assertEqual(controller.calls, [("saved",), ("portable", REQUEST)])
+        dialog.portable_mode = False
+        dialog.portable_available = False
+        dialog.events.put(("operation", (mode, operation)))
+        dialog._pump()
+        self.assertTrue(dialog.portable_mode)
+        self.assertTrue(dialog.portable_available)
+        self.assertEqual(dialog.portable_verify_button.state, "normal")
+
+    def test_old_hub_or_ordinary_history_falls_back_only_on_typed_refusal(self):
+        dialog, _tasks = fixture()
+        operation = completed_pair().operation
+        for code in ("NOT_PORTABLE", "PORTABLE_UNAVAILABLE"):
+            controller = ModeController(operation, portable_error=HostBackupRejected(code, code))
+            dialog._controller = lambda controller=controller: controller
+            with self.subTest(code=code):
+                mode, received = dialog._operation_with_mode(REQUEST)
+                self.assertFalse(mode)
+                self.assertIs(received, operation)
+                self.assertEqual(controller.calls,
+                                 [("saved",), ("portable", REQUEST), ("ordinary", REQUEST)])
+        controller = ModeController(operation, portable_error=HostBackupRejected(
+            "SOURCE_CHANGED", "source changed"))
+        dialog._controller = lambda: controller
+        with self.assertRaises(HostBackupRejected):
+            dialog._operation_with_mode(REQUEST)
+        self.assertNotIn(("ordinary", REQUEST), controller.calls)
+
     def test_refresh_disables_portable_on_older_verified_server(self):
         dialog, tasks = fixture()
         controller = Controller(dialog.state)
@@ -201,7 +263,7 @@ class HostBackupDialogTest(unittest.TestCase):
         dialog.portable_mode = True
         dialog.operation = pair.operation
         dialog.portable_available = False
-        dialog.events.put(("operation", pair.operation))
+        dialog.events.put(("operation", (True, pair.operation)))
         dialog._pump()
         self.assertTrue(dialog.portable_available)
         dialog._controls()

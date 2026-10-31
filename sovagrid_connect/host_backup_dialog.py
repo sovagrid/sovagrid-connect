@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 import uuid
 
 from .host_backup import (HostArchive, HostBackupController, HostBackupOperation,
+                          HostBackupRejected,
                           HostBackupPlan, HostBackupState, HostPortableOperation,
                           HostPortablePair)
 from .installer import InstallError
@@ -385,7 +386,25 @@ class HostBackupDialog:
             return
         identity = self.request_id
         self.status.set("Читаем сохранённое состояние задания…")
-        self._run("operation", lambda: self._controller().operation_status(identity))
+        self._run("operation", lambda: self._operation_with_mode(identity))
+
+    def _operation_with_mode(self, identity: str) -> tuple[bool, HostBackupOperation]:
+        """Identify even an older portable job whose local marker was replaced."""
+        controller = self._controller()
+        saved = controller.saved_request()
+        if saved is not None and saved.request_id == identity:
+            if saved.mode == "portable":
+                return True, controller.portable_status(identity).operation
+            return False, controller.operation_status(identity)
+        try:
+            portable = controller.portable_status(identity)
+        except HostBackupRejected as exc:
+            # A verified server explicitly distinguishes an ordinary job.
+            # An older verified server has no portable command at all.
+            if exc.code not in ("NOT_PORTABLE", "PORTABLE_UNAVAILABLE"):
+                raise
+            return False, controller.operation_status(identity)
+        return True, portable.operation
 
     def recover_operation(self) -> None:
         operation = self.operation
@@ -437,16 +456,9 @@ class HostBackupDialog:
             selected = tree.selection()
             if not selected:
                 return
-            try:
-                saved = self._controller().saved_request()
-            except InstallError as exc:
-                self.status.set(str(exc))
-                messagebox.showerror("Полные копии сервера", str(exc), parent=window)
-                return
             self.request_id = selected[0]
             self.operation = None
-            self.portable_mode = (saved is not None and saved.request_id == self.request_id and
-                                  saved.mode == "portable")
+            self.portable_mode = False
             self.portable_pair = None
             self.exported_path = None
             window.destroy()
@@ -510,12 +522,19 @@ class HostBackupDialog:
                 self._show(_archive_text(archive))
                 self.status.set("Полная копия создана и проверена на сервере.")
             elif event in ("started", "operation", "recovered", "portable_started"):
-                if event == "operation" and self.portable_mode:
-                    # The saved portable request was validated by the pinned
-                    # portable-status source proof, including after app restart.
-                    self.portable_available = True
-                self._render_operation(payload.operation if isinstance(payload, HostPortableOperation)
-                                       else payload)
+                if event == "operation":
+                    mode, operation = payload
+                    if self.portable_mode != mode:
+                        self.portable_pair = None
+                        self.exported_path = None
+                    self.portable_mode = mode
+                    if mode:
+                        # A pinned portable-status proof succeeded, including
+                        # when the local marker now points to a newer job.
+                        self.portable_available = True
+                else:
+                    operation = payload.operation if isinstance(payload, HostPortableOperation) else payload
+                self._render_operation(operation)
             elif event == "portable_verified":
                 self.portable_pair = payload
                 self._show(_portable_text(payload))
