@@ -20,7 +20,7 @@ PROFILE_LABELS = {"default": "Основной Agent", "local": "Локальн�
 
 
 class ContainerActionSetupDialog:
-    def __init__(self, root, theme, options, on_closed, *, approved_manifest_sha256: str | None):
+    def __init__(self, root, theme, options, on_closed, *, approved_manifest_sha256: str | tuple[str, ...] | None):
         self.root, self.theme, self.options, self.on_closed = root, theme, options, on_closed
         self.approved_manifest_sha256 = approved_manifest_sha256
         self.controller: ContainerActionSetupController | None = None

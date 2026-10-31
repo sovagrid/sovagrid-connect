@@ -47,12 +47,12 @@ class Opener:
 
 
 class ServerBundleDownloadTests(unittest.TestCase):
-    def test_published_release_pin_matches_reviewed_v013_asset(self) -> None:
+    def test_published_release_pin_matches_reviewed_v014_asset(self) -> None:
         self.assertEqual(PUBLISHED_SERVER_SOURCE_URL,
                          "https://github.com/sovagrid/sovagrid-blueprint/releases/download/"
-                         "server-v0.13.0/SovaGrid-server-source.tar.gz")
+                         "server-v0.14.0/SovaGrid-server-source.tar.gz")
         self.assertEqual(PUBLISHED_SERVER_SOURCE_SHA256,
-                         "7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17")
+                         "10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9")
 
     def test_verified_update_cache_survives_dialog_and_rechecks_existing_bytes(self) -> None:
         payload = b"published update fixture"

@@ -13,6 +13,7 @@ import subprocess
 from typing import Callable
 import uuid
 
+from .approved_manifest import ApprovedManifestMixin
 from .core import ConnectionOptions
 from .installer import InstallError
 from .promotion import PromotionController
@@ -114,13 +115,11 @@ def _flags(value: object) -> tuple[bool, bool]:
     return value["terminal"], value["files"]
 
 
-class LocalOperationsController:
-    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | None,
+class LocalOperationsController(ApprovedManifestMixin):
+    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | tuple[str, ...] | None,
                  popen: Callable[..., subprocess.Popen] = subprocess.Popen,
                  progress: Callable[[str], None] | None = None,
                  transport: PromotionController | None = None) -> None:
-        if approved_manifest_sha256 is not None and _SHA.fullmatch(approved_manifest_sha256) is None:
-            raise InstallError("SHA-256 разрешённых исходников локального Agent неверен")
         self.transport = transport or PromotionController(
             options, approved_archive_sha256="0" * 64, popen=popen, progress=progress,
         )

@@ -623,7 +623,7 @@ class AmneziaDialog(_Dialog):
         if event in ("settings_access", "settings_armed", "settings_disarmed"):
             if (not isinstance(payload, AmneziaSettingsAccess) or
                     payload.options != self.options or
-                    payload.manifest_sha256 != self.approved_manifest_sha256):
+                    payload.manifest_sha256 != self._controller().manifest):
                 self._invalidate()
                 self.status.set("Сервер прислал неверное разрешение AWG3. Повторите проверку.")
                 return

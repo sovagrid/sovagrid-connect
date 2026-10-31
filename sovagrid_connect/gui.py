@@ -48,22 +48,29 @@ from .auto_update import (AutoUpdatePolicy, AutoUpdatePolicyStore, AutoUpdateErr
                           run_pinned_update, target_id)
 
 
-# Published server-v0.13.0 source bundle. Connect verifies these exact bytes
-# and the installed source before each root operation; signed discovery stays off.
+# Published server-v0.14.0 source bundle. Connect verifies these exact bytes
+# and the installed source before each root operation.
 _APPROVED_SERVER_SOURCE_SHA256 = PUBLISHED_SERVER_SOURCE_SHA256
-_APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17"
-_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17"
-_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
-_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
+_APPROVED_PROMOTION_BUNDLE_SHA256: str | None = "10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9"
+_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256: str | None = "10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9"
+_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
 # Extend this allowlist only after each signed-feed server bundle passes VM review.
 _APPROVED_RELEASE_FEED_MANIFEST_SHA256S: tuple[str, ...] = (
     "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
+    "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
 )
-_APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
-_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
-_APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
-_APPROVED_HUB_BACKUP_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
-_APPROVED_HOST_BACKUP_MANIFEST_SHA256: str | None = "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280"
+_APPROVED_SERVICE_SETUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+_APPROVED_VPN_SETUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+_APPROVED_HUB_BACKUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+_APPROVED_HOST_BACKUP_MANIFEST_SHA256: str | None = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+# Advanced actions have the same reviewed remote contract in both releases.
+# Keep this list separate from the feed: a new signed release needs a new review.
+_APPROVED_ADVANCED_MANIFEST_SHA256S: tuple[str, ...] = (
+    "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
+    "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
+)
 
 
 class Launcher:
@@ -459,7 +466,7 @@ class Launcher:
             return
         self.local_operations_window = LocalOperationsDialog(
             self.root, self.theme, options, self.local_operations_closed,
-            approved_manifest_sha256=_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def local_operations_closed(self) -> None:
@@ -480,7 +487,7 @@ class Launcher:
             return
         self.local_container_inventory_window = LocalContainerInventoryDialog(
             self.root, self.theme, options, self.local_container_inventory_closed,
-            approved_manifest_sha256=_APPROVED_LOCAL_CONTAINER_INVENTORY_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def local_container_inventory_closed(self) -> None:
@@ -501,7 +508,7 @@ class Launcher:
             return
         self.local_commands_window = LocalCommandsDialog(
             self.root, self.theme, options, self.local_commands_closed,
-            approved_manifest_sha256=_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def local_commands_closed(self) -> None:
@@ -543,7 +550,7 @@ class Launcher:
             return
         self.service_setup_window = ServiceSetupDialog(
             self.root, self.theme, options, self.service_setup_closed,
-            approved_manifest_sha256=_APPROVED_SERVICE_SETUP_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def service_setup_closed(self) -> None:
@@ -564,7 +571,7 @@ class Launcher:
             return
         self.container_action_setup_window = ContainerActionSetupDialog(
             self.root, self.theme, options, self.container_action_setup_closed,
-            approved_manifest_sha256=_APPROVED_CONTAINER_ACTION_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def container_action_setup_closed(self) -> None:
@@ -585,7 +592,7 @@ class Launcher:
             return
         self.hub_backup_window = HubBackupDialog(
             self.root, self.theme, options, self.hub_backup_closed,
-            approved_manifest_sha256=_APPROVED_HUB_BACKUP_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def hub_backup_closed(self) -> None:
@@ -606,7 +613,7 @@ class Launcher:
             return
         self.host_backup_window = HostBackupDialog(
             self.root, self.theme, options, self.host_backup_closed,
-            approved_manifest_sha256=_APPROVED_HOST_BACKUP_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def host_backup_closed(self) -> None:
@@ -627,7 +634,7 @@ class Launcher:
             return
         self.routing_window = RoutingDialog(
             self.root, self.theme, options, self.routing_closed,
-            approved_manifest_sha256=_APPROVED_VPN_SETUP_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def routing_closed(self) -> None:
@@ -648,7 +655,7 @@ class Launcher:
             return
         self.amnezia_window = AmneziaDialog(
             self.root, self.theme, options, self.amnezia_closed,
-            approved_manifest_sha256=_APPROVED_VPN_SETUP_MANIFEST_SHA256,
+            approved_manifest_sha256=_APPROVED_ADVANCED_MANIFEST_SHA256S,
         )
 
     def amnezia_closed(self) -> None:

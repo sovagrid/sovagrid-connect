@@ -14,6 +14,7 @@ import shlex
 import subprocess
 from typing import Callable
 
+from .approved_manifest import ApprovedManifestMixin
 from .container_action_setup_remote import SCRIPT
 from .core import ConnectionOptions
 from .installer import InstallError
@@ -157,13 +158,11 @@ class ContainerActionState:
     plan: tuple[str, tuple[tuple[str, str, str, tuple[str, ...]], ...], bool, bool] | None = None
 
 
-class ContainerActionSetupController:
-    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | None,
+class ContainerActionSetupController(ApprovedManifestMixin):
+    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | tuple[str, ...] | None,
                  popen: Callable[..., subprocess.Popen] = subprocess.Popen,
                  progress: Callable[[str], None] | None = None,
                  transport: PromotionController | None = None) -> None:
-        if approved_manifest_sha256 is not None and SHA.fullmatch(approved_manifest_sha256) is None:
-            raise InstallError("SHA-256 проверенного серверного выпуска неверен")
         self.transport = transport or PromotionController(
             options, approved_archive_sha256="0" * 64, popen=popen, progress=progress)
         self.options = self.transport.options

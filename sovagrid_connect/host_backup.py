@@ -14,6 +14,7 @@ import shlex
 import subprocess
 from typing import Callable
 
+from .approved_manifest import ApprovedManifestMixin
 from .core import ConnectionOptions
 from .host_backup_remote import SCRIPT
 from .host_backup_request import HostBackupRequest, HostBackupRequestStore
@@ -145,14 +146,12 @@ class HostBackupRejected(InstallError):
         self.code = code
 
 
-class HostBackupController:
-    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | None,
+class HostBackupController(ApprovedManifestMixin):
+    def __init__(self, options: ConnectionOptions, *, approved_manifest_sha256: str | tuple[str, ...] | None,
                  popen: Callable[..., subprocess.Popen] = subprocess.Popen,
                  progress: Callable[[str], None] | None = None,
                  transport: PromotionController | None = None,
                  request_store: HostBackupRequestStore | None = None) -> None:
-        if approved_manifest_sha256 is not None and SHA.fullmatch(approved_manifest_sha256) is None:
-            raise InstallError("SHA-256 проверенного серверного выпуска неверен")
         self.transport = transport or PromotionController(
             options, approved_archive_sha256="0" * 64, popen=popen, progress=progress)
         self.options = self.transport.options

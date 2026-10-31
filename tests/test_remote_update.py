@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -35,6 +36,27 @@ def updater() -> dict:
 
 @unittest.skipIf(os.name == "nt", "remote transaction fixtures require Ubuntu/POSIX filesystem semantics")
 class RemoteUpdateTests(unittest.TestCase):
+    def test_unsnapshotted_web_agent_refused_before_preview_or_apply(self) -> None:
+        for footprint in (
+                'var/lib/sovagrid/.web-agent-installer-managed-by-run-sh',
+                'var/lib/sovagrid/web-agent',
+                'etc/systemd/system/sovagrid-web-agent-control.socket',
+                'etc/sovagrid/.external-agent-apply-managed-by-run-sh',
+                'var/lib/sovagrid/external-agent-operations'):
+            with self.subTest(footprint=footprint), tempfile.TemporaryDirectory() as directory:
+                code = updater()
+                root = Path(directory)
+                artifact = root / footprint
+                artifact.parent.mkdir(parents=True)
+                artifact.touch()
+                code['ROOT'] = root
+                code['inspect_state'] = lambda: self.fail('preview reached server state')
+                for operation in (lambda: code['preview'](),
+                                  lambda: code['apply']('a' * 64, 'b' * 64)):
+                    with self.assertRaisesRegex(code['UpdateFailure'], 'UPDATER_CONTRACT'):
+                        operation()
+                self.assertFalse((root / 'opt/sovagrid-candidates').exists())
+
     def test_socket_activated_services_need_listening_sockets_not_idle_workers(self) -> None:
         code = updater()
         with tempfile.TemporaryDirectory() as directory:
@@ -429,14 +451,20 @@ class RemoteUpdateTests(unittest.TestCase):
 
     def test_browser_ssh_route_health_requires_real_host_key_reply(self) -> None:
         code = updater()
+        kind = b'ssh-ed25519'
+        key = (len(kind).to_bytes(4, 'big') + kind +
+               (32).to_bytes(4, 'big') + bytes(range(32)))
+        valid = {'protocol': 1, 'port': 22, 'key_type': kind.decode('ascii'),
+                 'fingerprint': 'SHA256:' + base64.b64encode(
+                     hashlib.sha256(key).digest()).decode('ascii').rstrip('='),
+                 'host_key_blob': base64.b64encode(key).decode('ascii')}
         class Response:
             status = 200
             def __init__(self, body): self.body = body
             def read(self, _limit): return self.body
             def __enter__(self): return self
             def __exit__(self, *_args): return None
-        reply = [b'{"protocol":1,"port":22,"key_type":"ssh-ed25519","fingerprint":"SHA256:' +
-                 b'A' * 43 + b'"}']
+        reply = [json.dumps(valid).encode('ascii')]
         requests = []
         def urlopen(request, **_kwargs):
             requests.append(request)
@@ -447,8 +475,21 @@ class RemoteUpdateTests(unittest.TestCase):
         code['browser_ssh_route_health']()
         self.assertEqual(requests[0].kwargs['method'], 'POST')
         self.assertEqual(requests[0].kwargs['headers']['Origin'], 'http://127.0.0.1:8766')
-        reply[0] = b'{"ok":true}'
-        with self.assertRaisesRegex(code['UpdateFailure'], 'reply invalid'):
+        for changed in (
+                lambda value: value.pop('host_key_blob'),
+                lambda value: value.update(host_key_blob='AAAA'),
+                lambda value: value.update(fingerprint='SHA256:' + 'A' * 43),
+                lambda value: value.update(key_type='ssh-rsa'),
+                lambda value: value.update(protocol=True),
+                lambda value: value.update(extra=True)):
+            with self.subTest(changed=changed):
+                value = dict(valid)
+                changed(value)
+                reply[0] = json.dumps(value).encode('ascii')
+                with self.assertRaisesRegex(code['UpdateFailure'], 'reply invalid'):
+                    code['browser_ssh_route_health']()
+        reply[0] = b' ' * (16 * 1024 + 1)
+        with self.assertRaisesRegex(code['UpdateFailure'], 'too large'):
             code['browser_ssh_route_health']()
 
     def test_staged_bundle_rechecks_archive_and_extracted_manifest(self) -> None:

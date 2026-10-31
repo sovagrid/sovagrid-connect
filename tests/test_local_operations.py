@@ -41,9 +41,11 @@ class Transport:
     def _verify_root_access(self):
         self.root_proofs += 1
 
-    def _execute(self, command, *, timeout):
+    def _execute(self, command, *, timeout, limit=4096):
         self.commands.append(command)
         assert command.startswith(self._privileged)
+        if command.endswith("/usr/bin/sha256sum -- /opt/sovagrid-src/sovagrid-bundle.json"):
+            return 0, (self.manifest + "  /opt/sovagrid-src/sovagrid-bundle.json\n").encode()
         if " -c " in command:
             return 0, wire({"protocol": 1, "manifest_sha256": self.manifest,
                             "local_server_id": LOCAL_ID, "commands": True})
@@ -96,6 +98,36 @@ class LocalOperationsTests(unittest.TestCase):
         self.assertNotIn("local_operations.py preview", transport.commands[0])
         self.assertIn("sovagrid-terminal-local-control.socket", _SOURCE_PROBE)
         compile(_SOURCE_PROBE, "<local-source-probe>", "exec")
+
+    def test_reviewed_manifest_set_preserves_both_releases_and_source_recheck(self):
+        reviewed = (MANIFEST, "b" * 64)
+        for installed in reviewed:
+            with self.subTest(installed=installed):
+                transport = Transport(user="admin")
+                transport.manifest = installed
+                controller = self.controller(transport, approved=reviewed)
+                self.assertEqual(transport.commands, [])  # constructor is offline
+                old = controller.preview()
+                self.assertEqual(old.manifest_sha256, installed)
+                self.assertEqual(transport.commands[1].count(installed), 1)
+                controller.change("terminal", True, old)
+                self.assertEqual(sum("sha256sum --" in cmd for cmd in transport.commands), 1)
+                self.assertTrue(all(cmd.startswith("sudo -n -- ") for cmd in transport.commands))
+
+        transport = Transport()
+        transport.manifest = "c" * 64
+        with self.assertRaisesRegex(InstallError, "не входит в проверенный список"):
+            self.controller(transport, approved=reviewed).preview()
+        self.assertEqual(len(transport.commands), 1)
+        self.assertFalse(any("local_operations.py" in cmd for cmd in transport.commands))
+
+        transport = Transport()
+        controller = self.controller(transport, approved=reviewed)
+        old = controller.preview()
+        transport.manifest = reviewed[1]
+        with self.assertRaises(InstallError):
+            controller.change("terminal", True, old)
+        self.assertFalse(any("local_operations.py enable" in cmd for cmd in transport.commands))
 
     def test_sudo_route_enables_and_disables_one_feature_without_changing_other(self):
         transport = Transport(user="exampleuser")

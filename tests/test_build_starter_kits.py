@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -42,7 +43,20 @@ class StarterPinTests(unittest.TestCase):
         self.assertEqual(pins["_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256"],
                          PUBLISHED_SERVER_SOURCE_SHA256)
         self.assertEqual(pins["_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"],
-                         "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280")
+                         "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286")
+
+    def test_starter_manifest_is_in_runtime_advanced_allowlist(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "sovagrid_connect/gui.py"
+        module = ast.parse(source.read_text(encoding="utf-8"))
+        assignments = [node for node in module.body if isinstance(node, ast.AnnAssign) and
+                       isinstance(node.target, ast.Name) and
+                       node.target.id == "_APPROVED_ADVANCED_MANIFEST_SHA256S"]
+        self.assertEqual(len(assignments), 1)
+        approved = ast.literal_eval(assignments[0].value)
+        self.assertEqual(approved, (
+            "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
+            approved_release_pins()["_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"],
+        ))
 
     def test_exact_imported_alias_resolves_without_running_gui(self) -> None:
         gui = IMPORT + "_APPROVED_SERVER_SOURCE_SHA256 = PUBLISHED_SERVER_SOURCE_SHA256\n" + PINS
