@@ -557,6 +557,11 @@ class HostBackupController(ApprovedManifestMixin):
             self.transport, destination, archive_id=pair.archive.id,
             archive_bytes=pair.archive.bytes, image_bytes=pair.image_bytes,
             receipt=pair.image_receipt,
+            archive_record={"id": pair.archive.id,
+                            "created_at": pair.archive.created_at,
+                            "layout": pair.archive.layout,
+                            "bytes": pair.archive.bytes,
+                            "files": pair.archive.files},
             current_manifest_sha256=self.approved_manifest_sha256,
             progress=self.progress)
 
