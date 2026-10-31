@@ -90,7 +90,7 @@ try:
             pure = PurePosixPath(name)
             need(len(name) <= 240 and name.isascii() and not name.startswith('/') and
                  pure.parts and not any(part in ('', '.', '..') or
-                 re.fullmatch(r'[A-Za-z0-9_.-]+', part) is None for part in pure.parts) and
+                 re.fullmatch(r'[A-Za-z0-9_.@-]+', part) is None for part in pure.parts) and
                  '/'.join(pure.parts) == name and name not in names)
             names.add(name)
             target = stage / name

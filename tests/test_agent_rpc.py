@@ -216,6 +216,15 @@ class RPCProcessTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name=='posix','Remote bootstrap verifies Linux/POSIX filesystem rules')
 class PreexecutionTrustTests(unittest.TestCase):
+    def test_remote_source_name_accepts_systemd_template_and_rejects_traversal(self):
+        scope = {}
+        exec(compile(_REMOTE_COMMON, "remote-source-name", "exec"), scope)
+        safe_name = scope["safe_name"]
+        template = "sovagrid-blueprint/deploy/sovagrid-external-agent-apply@.service"
+        self.assertEqual(safe_name(template), template)
+        with self.assertRaises(scope["Stop"]):
+            safe_name("sovagrid-blueprint/deploy/../unsafe@.service")
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(dir=Path.cwd())
         self.root=Path(self.temp.name);self.source=self.root/'source';self.source.mkdir()

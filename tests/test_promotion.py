@@ -181,6 +181,7 @@ class PromotionControllerTests(unittest.TestCase):
     def test_remote_programs_compile_and_activation_does_not_enable_commands(self) -> None:
         compile(STAGE_SCRIPT, "stage", "exec")
         compile(ACTION_SCRIPT, "action", "exec")
+        self.assertIn("re.fullmatch(r'[A-Za-z0-9_.@-]+', part)", STAGE_SCRIPT)
         self.assertIn("'activate'", ACTION_SCRIPT)
         self.assertNotIn("--enable-commands", ACTION_SCRIPT)
 

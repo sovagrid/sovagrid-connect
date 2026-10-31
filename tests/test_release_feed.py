@@ -9,7 +9,7 @@ import unittest
 from sovagrid_connect.core import ConnectionOptions
 from sovagrid_connect.installer import InstallError
 from sovagrid_connect.release_feed import ReleaseFeedController
-from sovagrid_connect.release_feed_remote import MUTATION_SCRIPT, SCRIPT
+from sovagrid_connect.release_feed_remote import MUTATION_SCRIPT, SCRIPT, SOURCE_PROOF
 
 
 MANIFEST = "3" * 64
@@ -62,6 +62,14 @@ class Transport:
 
 
 class ReleaseFeedTests(unittest.TestCase):
+    def test_source_proof_accepts_systemd_template_but_rejects_traversal(self):
+        scope = {}
+        exec(compile(SOURCE_PROOF, "release-feed-source-proof", "exec"), scope)
+        safe = scope["SAFE"]
+        self.assertIsNotNone(safe.fullmatch(
+            "sovagrid-blueprint/deploy/sovagrid-external-agent-apply@.service"))
+        self.assertIsNone(safe.fullmatch("sovagrid-blueprint/deploy/../unsafe@.service"))
+
     def controller(self, transport, approved=MANIFEST):
         return ReleaseFeedController(transport.options, transport=transport,
                                      approved_manifest_sha256=approved)

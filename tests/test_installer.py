@@ -52,8 +52,10 @@ def make_bundle(path: Path, *, altered_hash: bool = False, extra_name: str | Non
                 special_link: bool = False, duplicate: bool = False,
                 unsafe_mode: bool = False, commit: str = "a" * 40,
                 journal: bool = False, caddy_mode: int = 0o644,
-                hub_only_update: bool = False) -> None:
+                hub_only_update: bool = False, extra_file: str | None = None) -> None:
     files = dict(REQUIRED)
+    if extra_file is not None:
+        files[extra_file] = b"fixture\n"
     if journal:
         files["sovagrid-blueprint/run.sh"] += b"# SOVAGRID_JOURNAL_INSTALL_V1\n"
         for name in (
@@ -228,6 +230,17 @@ print("SG_INSTALL_STAGE:DONE")
 
 
 class BundleTests(unittest.TestCase):
+    def test_accepts_systemd_template_without_allowing_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "bundle.tar.gz")
+            template = "sovagrid-blueprint/deploy/sovagrid-external-agent-apply@.service"
+            make_bundle(path, extra_file=template)
+            self.assertEqual(verify_bundle(path).files, len(REQUIRED) + 1)
+
+            make_bundle(path, extra_file="sovagrid-blueprint/deploy/../unsafe@.service")
+            with self.assertRaises(InstallError):
+                verify_bundle(path)
+
     def test_real_distribution_manifest_and_snapshot(self) -> None:
         real = Path(__file__).resolve().parents[2] / "SovaGrid-server-source.tar.gz"
         if not real.is_file():

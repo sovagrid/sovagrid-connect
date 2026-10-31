@@ -11,7 +11,8 @@ DEPLOY = ROOT / 'sovagrid-blueprint/deploy'
 UNITS = pathlib.Path('/etc/systemd/system')
 MARKER = pathlib.Path('/var/lib/sovagrid/.release-feed-units-managed-by-run-sh')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
-SAFE = re.compile(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\Z')
+SAFE = re.compile(r'(?!\.{1,2}(?:/|\Z))[A-Za-z0-9_.@-]+'
+                  r'(?:/(?!\.{1,2}(?:/|\Z))[A-Za-z0-9_.@-]+)*\Z')
 GENERATED = re.compile(r'sovagrid-[a-z]+/(?:[A-Za-z0-9_.-]+/)*__pycache__/[A-Za-z0-9_.-]+\.cpython-[0-9]+\.pyc\Z')
 COMPONENTS = {'sovagrid-blueprint', 'sovagrid-hub', 'sovagrid-web', 'sovagrid-agent', 'sovagrid-vpn'}
 REQUIRED = {'sovagrid-blueprint/deploy/release_feed.py',
