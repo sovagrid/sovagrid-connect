@@ -6,6 +6,9 @@ from __future__ import annotations
 from collections import deque
 from email.utils import formatdate
 import json
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -177,6 +180,26 @@ class PromotionControllerTests(unittest.TestCase):
                 execute.assert_called_once_with(
                     ("" if user == "root" else "sudo -n -- ") + "python3 - inspect",
                     data=b"#!/usr/bin/env python3\n", timeout=90)
+
+    def test_explicit_root_sudo_route_reaches_ssh_once_with_and_without_stdin(self) -> None:
+        for user in ("root", "exampleuser"):
+            with self.subTest(user=user), tempfile.TemporaryDirectory() as temporary:
+                calls = []
+                def spawn(argv, **kwargs):
+                    calls.append(argv[-1])
+                    return subprocess.Popen([sys.executable, "-c",
+                        "import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data or b'0\\n')"],
+                        **kwargs)
+                controller = PromotionController(ConnectionOptions(host="target.example", user=user,
+                    ssh_executable=sys.executable), approved_archive_sha256=ARCHIVE, popen=spawn)
+                with patch("sovagrid_connect.installer.helper_path",
+                           return_value=str(Path(temporary) / "unused-askpass")):
+                    controller._verify_root_access()
+                    command = controller._privileged + "python3 - inspect"
+                    self.assertEqual(controller._execute(command, data=b"trusted helper"),
+                                     (0, b"trusted helper"))
+                prefix = "" if user == "root" else "sudo -n -- "
+                self.assertEqual(calls, [prefix + "id -u", prefix + "python3 - inspect"])
 
     def test_remote_programs_compile_and_activation_does_not_enable_commands(self) -> None:
         compile(STAGE_SCRIPT, "stage", "exec")

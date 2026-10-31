@@ -132,6 +132,15 @@ MAX_BACKUP = 4 * 1024**3
 MAX_FAILURE_LOG = 2 * 1024**2
 MAX_FAILURE_LOGS = 5
 ACTIVE_CHILD = None
+HUB_ONLY_FOOTPRINTS = (
+    '/var/lib/sovagrid-promotion',
+    '/opt/sovagrid-agent-local', '/etc/sovagrid-local',
+    '/var/lib/sovagrid-agent-local', '/var/lib/sovagrid-containers-local',
+    '/etc/systemd/system/sovagrid-agent-local.service',
+    '/etc/systemd/system/sovagrid-hub-only-update.service',
+    '/etc/systemd/system/sovagrid-hub-only-update.timer',
+    '/etc/sovagrid-hub/hub-only-auto-update.json',
+)
 
 class UpdateFailure(Exception):
     pass
@@ -1413,6 +1422,7 @@ def restore(folder, state):
     return True
 
 def inspect_state():
+    refuse_hub_only_layout()
     if os.geteuid() != 0 or path('/etc/os-release').read_text().find('ID=ubuntu') < 0:
         fail('HOST')
     source = path('/opt/sovagrid-src')
@@ -1431,7 +1441,15 @@ def refuse_unsnapshotted_services():
     if any(os.path.lexists(path(item)) for item in UNSNAPSHOTTED_SERVICE_PATHS):
         fail('UPDATER_CONTRACT')
 
+def refuse_hub_only_layout():
+    # A full-server transaction must never reinterpret an independent Agent
+    # or an interrupted promotion as a local full installation.
+    if any(os.path.lexists(path(item)) for item in HUB_ONLY_FOOTPRINTS):
+        fail('HUB_ONLY_LAYOUT')
+
+
 def preview():
+    refuse_hub_only_layout()
     refuse_unsnapshotted_services()
     source, digest, commits, flags, expected = inspect_state()
     emit('SG_CURRENT_MANIFEST:' + digest)
@@ -1496,6 +1514,7 @@ def apply(candidate_digest, expected_manifest, *, automatic=False):
     if automatic:
         fail('UPDATER_CONTRACT')
     with installation_lock() as installation_descriptor:
+        refuse_hub_only_layout()
         return _apply_locked(candidate_digest, expected_manifest, automatic=automatic,
                              installation_descriptor=installation_descriptor)
 

@@ -220,7 +220,8 @@ def _stream_remote(transport, kind: str, identity: str, manifest: str,
                 pass
 
     with manager._session() as (config, helper):
-        process = manager._ssh(config, helper, command)
+        # The transport already selected its explicit root/sudo prefix.
+        process = manager._ssh(config, helper, command, privileged=False)
         timer = threading.Timer(TRANSFER_TIMEOUT, stop_on_timeout)
         timer.daemon = True
         timer.start()

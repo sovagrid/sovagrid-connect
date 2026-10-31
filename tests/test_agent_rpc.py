@@ -126,6 +126,25 @@ class RPCProcessTests(unittest.TestCase):
         self.assertNotIn(RID,self.calls[-1][0][-1])
         self.assert_reaped()
 
+    def test_nonroot_login_probes_actual_euid_and_adds_sudo_exactly_once(self):
+        self.update(uid=1000)
+        rpc=self.rpc(user='exampleuser')
+        self.assertEqual(rpc.preflight()['euid'],0)
+        self.assertEqual(len(self.calls),2)
+        self.assertTrue(self.calls[0][0][-1].startswith('/usr/bin/python3 -I -c '))
+        self.assertTrue(self.calls[1][0][-1].startswith('sudo -n -- /usr/bin/python3 -I -c '))
+        rpc.call('target-status',{'protocol':1,'request_id':RID})
+        self.assertTrue(self.calls[-1][0][-1].startswith('sudo -n -- /usr/bin/python3 -I -c '))
+        self.assertEqual(self.calls[-1][0][-1].count('sudo -n -- '),1)
+        self.assert_reaped()
+
+    def test_nonroot_login_with_actual_root_euid_needs_no_sudo(self):
+        rpc=self.rpc(user='exampleuser')
+        self.assertEqual(rpc.preflight()['euid'],0)
+        self.assertEqual(len(self.calls),1)
+        self.assertTrue(self.calls[0][0][-1].startswith('/usr/bin/python3 -I -c '))
+        self.assert_reaped()
+
     def test_invalid_requests_and_wrong_role_never_spawn_or_serialize_private_data(self):
         rpc=self.rpc()
         for action,payload in [('hub-preview',{'protocol':1}),('target-status',{'protocol':1,'request_id':RID,'agent_token':'private-request-canary'}),

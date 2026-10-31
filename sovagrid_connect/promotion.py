@@ -114,6 +114,7 @@ class PromotionController:
                  timeout: float = 45, limit: int = 4096) -> tuple[int, bytes]:
         if type(limit) is not int or not 1 <= limit <= 98304:
             raise InstallError("Недопустимый размер ответа сервера")
+        # Commands already carry the reviewed root/sudo route selected above.
         with tempfile.TemporaryDirectory(prefix="sovagrid-promotion-command-") as private_dir:
             input_path = source
             if data is not None:
@@ -123,11 +124,12 @@ class PromotionController:
                     stream.write(data)
             with self.manager._session() as (config, helper):
                 if input_path is None:
-                    process = self.manager._ssh(config, helper, command)
+                    process = self.manager._ssh(config, helper, command, privileged=False)
                     raw = self.manager._read_bounded(process, timeout=timeout, limit=limit)
                 else:
                     with input_path.open("rb") as input_file:
-                        process = self.manager._ssh(config, helper, command, input_file=input_file)
+                        process = self.manager._ssh(config, helper, command, input_file=input_file,
+                                                    privileged=False)
                         raw = self.manager._read_bounded(process, timeout=timeout, limit=limit)
         return process.returncode, raw
 

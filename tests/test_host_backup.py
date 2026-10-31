@@ -211,6 +211,7 @@ class StreamManager:
     def __init__(self, payloads):
         self.payloads = payloads
         self.calls = []
+        self.privileges = []
         self._lock = threading.Lock()
         self._process = None
 
@@ -218,8 +219,9 @@ class StreamManager:
     def _session(self):
         yield "pinned-config", "askpass-helper"
 
-    def _ssh(self, config, helper, command):
+    def _ssh(self, config, helper, command, *, privileged=True):
         self.calls.append((config, helper, command))
+        self.privileges.append(privileged)
         _prefix, _manifest, kind, _identity, _size, _sha = command.rsplit(" ", 5)
         item = self.payloads[kind]
         process = StreamProcess(*item) if isinstance(item, tuple) else StreamProcess(item)
@@ -629,8 +631,10 @@ class HostBackupTests(unittest.TestCase):
                 self.assertTrue(all(stat.S_IMODE((result / name).stat().st_mode) == 0o600
                                     for name in transfer._filenames(ARCHIVE_ID)))
             self.assertEqual(len(transport.manager.calls), 4)
+            self.assertEqual(transport.manager.privileges, [False] * 4)
             self.assertTrue(all(config == "pinned-config" and helper == "askpass-helper" and
-                                command.startswith("sudo -n -- /usr/bin/python3 -B -I -c ")
+                                command.startswith("sudo -n -- /usr/bin/python3 -B -I -c ") and
+                                command.count("sudo -n -- ") == 1
                                 for config, helper, command in transport.manager.calls))
             self.assertEqual(
                 [(command.rsplit(" ", 5)[-4], command.rsplit(" ", 5)[-3])

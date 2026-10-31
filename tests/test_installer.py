@@ -642,10 +642,23 @@ class InstallTests(unittest.TestCase):
                 installer.install(source)
             self.assertEqual(len(calls), 1)
 
-    def test_nonroot_refused_locally(self) -> None:
-        installer = ServerInstaller(ConnectionOptions(host="example.org", user="ubuntu"))
-        with self.assertRaisesRegex(InstallError, "root"):
-            installer.install(Path("missing.tar.gz"))
+    @patch("sovagrid_connect.installer.helper_path", return_value="fixture-askpass")
+    def test_nonroot_install_uses_noninteractive_sudo_and_preserves_archive(self, _helper) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "bundle.tar.gz")
+            make_bundle(source)
+            fake = Path(directory, "fake_ssh.py")
+            fake.write_text(FAKE_SSH)
+            commands = []
+            def popen(argv, **kwargs):
+                commands.append(argv[-1])
+                return subprocess.Popen([sys.executable, str(fake), *argv[1:]], **kwargs)
+            manager = ServerInstaller(ConnectionOptions("example.org", "ubuntu", ssh_executable=sys.executable),
+                                      popen=popen)
+            manager.install(source)
+            self.assertEqual(len(commands), 2)
+            self.assertTrue(all("/usr/bin/sudo -n --" in command for command in commands))
+            self.assertEqual(fake.with_suffix(".digest").read_text(), hashlib.sha256(source.read_bytes()).hexdigest())
 
     def test_changed_suggested_bundle_refused_before_ssh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -824,18 +837,13 @@ class InstallTests(unittest.TestCase):
             manager.disarm_server_timer()
             self.assertEqual(commands[-1], SERVER_TIMER_COMMAND + " disarm")
 
-    def test_server_timer_rejects_unpinned_or_nonroot_before_ssh(self) -> None:
-        prepared = PreparedUpdate(None, "a" * 64, "/opt/sovagrid-candidates/" + "a" * 64, False)
+    def test_server_timer_rejects_unpinned_source_before_ssh_for_root_or_sudo(self) -> None:
         no_ssh = lambda *_args, **_kwargs: self.fail("SSH must not start")
-        nonroot = ServerInstaller(ConnectionOptions(host="example.org", user="ubuntu"), popen=no_ssh)
-        with self.assertRaisesRegex(InstallError, "root"):
-            nonroot.arm_server_timer(prepared, expected_current_manifest="b" * 64)
-        with self.assertRaisesRegex(InstallError, "root"):
-            nonroot.server_timer_status()
-        root = ServerInstaller(ConnectionOptions(host="example.org", user="root"), popen=no_ssh)
         forged = PreparedUpdate(None, "a" * 64, "/tmp/other-candidate", False)
-        with self.assertRaisesRegex(InstallError, "неверный формат"):
-            root.arm_server_timer(forged, expected_current_manifest="b" * 64)
+        for user in ("root", "ubuntu"):
+            manager = ServerInstaller(ConnectionOptions(host="example.org", user=user), popen=no_ssh)
+            with self.assertRaisesRegex(InstallError, "неверный формат"):
+                manager.arm_server_timer(forged, expected_current_manifest="b" * 64)
 
     @patch("sovagrid_connect.installer.helper_path", return_value="fixture-askpass")
     def test_old_server_timer_fallback_is_explicit(self, _helper) -> None:
@@ -953,10 +961,11 @@ class GuiFirstInstallDownloadTests(unittest.TestCase):
                 progress("Скачано")
                 yield path
 
-        def install(path, *, expected_sha256):
+        def install(path, features, *, expected_sha256):
             self.assertEqual(seen, ["downloaded"])
             self.assertEqual(path.read_bytes(), b"verified")
             self.assertEqual(expected_sha256, PUBLISHED_SERVER_SOURCE_SHA256)
+            self.assertTrue(features.terminal and features.files and features.wireguard and features.containers)
             seen.append("ssh")
 
         manager.install.side_effect = install
@@ -996,7 +1005,7 @@ class GuiFirstInstallDownloadTests(unittest.TestCase):
         launcher = self._launcher()
         launcher.connecting = True
         launcher.root = Mock()
-        tunnel = SimpleNamespace(options=ConnectionOptions("server.example", "root"), alive=True)
+        tunnel = SimpleNamespace(options=ConnectionOptions("server.example", "ubuntu"), alive=True)
         launcher.tunnel = tunnel
         launcher.events.put(("server_status", (tunnel, ServerStatus("missing"))))
         with patch("sovagrid_connect.gui.nearby_server_bundle", return_value=None), \

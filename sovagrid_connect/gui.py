@@ -976,7 +976,8 @@ class Launcher:
                     progress=lambda line: self.events.put(("auto_install_progress", line))
                 ) if source is None else nullcontext(source))
                 with context as bundle:
-                    manager.install(bundle, expected_sha256=_APPROVED_SERVER_SOURCE_SHA256)
+                    manager.install(bundle, InstallFeatures(wireguard=True, terminal=True, files=True, containers=True),
+                                    expected_sha256=_APPROVED_SERVER_SOURCE_SHA256)
                 if self.closing:
                     return
                 tunnel.start(timeout=180)
@@ -1103,9 +1104,6 @@ class Launcher:
         except (ValueError, OSError) as exc:
             messagebox.showerror("Установка SovaGrid", f"Сначала заполните SSH-адрес и пользователя: {exc}")
             return
-        if options.user != "root":
-            messagebox.showerror("Установка SovaGrid", "Для первой установки укажите SSH-пользователя root.")
-            return
         window = tk.Toplevel(self.root)
         self.theme.style_window(window)
         window.title("SovaGrid · Первая установка")
@@ -1120,7 +1118,7 @@ class Launcher:
         ttk.Label(
             body,
             text="Скачайте проверенный выпуск SovaGrid прямо в приложении или выберите свой архив. "
-                 "Исходный код и run.sh будут выполнены на сервере от root. "
+                 "Исходный код и run.sh будут выполнены с правами администратора: root или sudo без пароля. "
                  "Установка откажет, если SovaGrid уже развёрнут.",
             wraplength=540,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
@@ -1169,9 +1167,10 @@ class Launcher:
         ttk.Label(body, textvariable=bundle_info, wraplength=540).grid(
             row=4, column=0, columnspan=3, sticky="w", pady=(7, 0)
         )
-        wireguard = tk.BooleanVar(value=False)
-        terminal = tk.BooleanVar(value=False)
-        files = tk.BooleanVar(value=False)
+        wireguard = tk.BooleanVar(value=True)
+        terminal = tk.BooleanVar(value=True)
+        files = tk.BooleanVar(value=True)
+        containers = tk.BooleanVar(value=True)
         journal = tk.BooleanVar(value=False)
         ttk.Checkbutton(body, text="Добавить управление WireGuard", variable=wireguard).grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(14, 0)
@@ -1182,25 +1181,29 @@ class Launcher:
         ttk.Checkbutton(body, text="Добавить файловый раздел", variable=files).grid(
             row=7, column=0, columnspan=3, sticky="w"
         )
+        ttk.Checkbutton(body, text="Мониторинг контейнеров", variable=containers).grid(
+            row=8, column=0, columnspan=3, sticky="w"
+        )
         ttk.Checkbutton(body, text="Читать журналы выбранных systemd-служб", variable=journal).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(8, 0)
+            row=9, column=0, columnspan=3, sticky="w", pady=(8, 0)
         )
         ttk.Label(body, text="Точные имена .service, по одному в строке (1–16):", wraplength=540).grid(
-            row=9, column=0, columnspan=3, sticky="w", pady=(5, 0)
+            row=10, column=0, columnspan=3, sticky="w", pady=(5, 0)
         )
         journal_text = tk.Text(body, width=56, height=3)
         self.theme.style_text(journal_text)
-        journal_text.grid(row=10, column=0, columnspan=3, sticky="ew")
+        journal_text.grid(row=11, column=0, columnspan=3, sticky="ew")
         journal_text.insert("1.0", "ssh.service\n")
         ttk.Label(
             body, text="SSH-пароль, 2FA и отпечаток нового хоста появятся в отдельных окнах. "
+                       "Используется root или sudo без пароля. Сам VPN включается отдельно. "
                        "Во время установки не закрывайте приложение.", wraplength=540,
-        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(10, 10))
+        ).grid(row=12, column=0, columnspan=3, sticky="w", pady=(10, 10))
         status = tk.StringVar(value="Готово к скачиванию и установке" if source_mode.get() == "release" else "Ожидание пакета")
         self.install_status = status
-        ttk.Label(body, textvariable=status, wraplength=540).grid(row=12, column=0, columnspan=3, sticky="w", pady=(0, 12))
+        ttk.Label(body, textvariable=status, wraplength=540).grid(row=13, column=0, columnspan=3, sticky="w", pady=(0, 12))
         controls = ttk.Frame(body)
-        controls.grid(row=13, column=0, columnspan=3, sticky="w")
+        controls.grid(row=14, column=0, columnspan=3, sticky="w")
 
         def begin() -> None:
             if self.installing:
@@ -1238,7 +1241,7 @@ class Launcher:
             self.feature_button.configure(state="disabled")
             self.update_button.configure(state="disabled")
             self.connect_button.configure(state="disabled")
-            features = InstallFeatures(wireguard.get(), terminal.get(), files.get(), units)
+            features = InstallFeatures(wireguard.get(), terminal.get(), files.get(), units, containers=containers.get())
             installer = ServerInstaller(options, progress=lambda line: self.events.put(("install_progress", line)))
             self.installer = installer
 
@@ -1292,9 +1295,6 @@ class Launcher:
             options = self._options().validated()
         except (ValueError, OSError) as exc:
             messagebox.showerror("Функции SovaGrid", f"Сначала заполните SSH-адрес и пользователя: {exc}")
-            return
-        if options.user != "root":
-            messagebox.showerror("Функции SovaGrid", "Для включения функций укажите SSH-пользователя root.")
             return
         window = tk.Toplevel(self.root)
         self.theme.style_window(window)
@@ -1457,9 +1457,6 @@ class Launcher:
             options = self._options().validated()
         except (ValueError, OSError) as exc:
             messagebox.showerror("Обновление SovaGrid", f"Сначала заполните SSH-адрес и пользователя: {exc}")
-            return
-        if options.user != "root":
-            messagebox.showerror("Обновление SovaGrid", "Для подготовки обновления укажите SSH-пользователя root.")
             return
         window = tk.Toplevel(self.root)
         self.theme.style_window(window)
@@ -2005,23 +2002,18 @@ class Launcher:
                 if server_status.kind == "missing":
                     nearby = nearby_server_bundle()
                     approved = nearby is not None and nearby[1] == _APPROVED_SERVER_SOURCE_SHA256
-                    if tunnel.options.user == "root":
-                        if messagebox.askyesno(
-                            "Установить SovaGrid",
-                            "На этом Ubuntu-сервере SovaGrid ещё нет. "
-                            + ("Установить проверенный пакет рядом с приложением" if approved else
-                               "Скачать и проверить серверный пакет с GitHub")
-                            + " и сразу открыть панель?",
-                            parent=self.root,
-                        ):
-                            self._auto_install_and_connect(tunnel, nearby[0] if approved else None)
-                            continue
-                    else:
-                        messagebox.showinfo(
-                            "Установка SovaGrid",
-                            "Сервер пуст. Для автоматической установки выберите SSH-пользователя root "
-                            "и нажмите «Подключиться» ещё раз.", parent=self.root,
-                        )
+                    if messagebox.askyesno(
+                        "Установить SovaGrid",
+                        "На этом Ubuntu-сервере SovaGrid ещё нет. "
+                        + ("Установить проверенный пакет рядом с приложением" if approved else
+                           "Скачать и проверить серверный пакет с GitHub")
+                        + " с терминалом, файлами, мониторингом контейнеров и управлением WireGuard, "
+                        "а затем открыть панель? Сам VPN включается отдельно. "
+                        "Нужны root или sudo без пароля.",
+                        parent=self.root,
+                    ):
+                        self._auto_install_and_connect(tunnel, nearby[0] if approved else None)
+                        continue
                 elif server_status.kind == "agent_only":
                     if _APPROVED_PROMOTION_BUNDLE_SHA256 is not None:
                         open_promotion = messagebox.askyesno(
