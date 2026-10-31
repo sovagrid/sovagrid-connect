@@ -24,7 +24,10 @@ from sovagrid_connect.core import ConnectionOptions
 from sovagrid_connect.installer import InstallError, ServerInstaller, verify_bundle
 
 
-OLD_MANIFEST = "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286"
+OLD_MANIFESTS = frozenset({
+    "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
+    "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
+})
 NEW_MANIFEST = "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f"
 SOURCE = Path("/opt/sovagrid-src")
 WEB_AGENT = Path("/var/lib/sovagrid/web-agent")
@@ -153,10 +156,12 @@ def main() -> None:
             os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and
             os.environ.get("SOVAGRID_BRIDGE_VM_FIXTURE") == "1" and
             os.geteuid() == 0 and sys.platform == "linux", "disposable root VM required")
-    require(len(sys.argv) == 4, "usage: web_agent_bridge_vm.py TARGET_ARCHIVE TARGET_SHA SCRATCH")
-    target, target_sha, scratch = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-    require(re.fullmatch(r"[0-9a-f]{64}", target_sha) is not None and scratch.is_dir(),
-            "invalid target pin or scratch")
+    require(len(sys.argv) == 5,
+            "usage: web_agent_bridge_vm.py TARGET_ARCHIVE TARGET_SHA SCRATCH OLD_MANIFEST")
+    target, target_sha, scratch, old_manifest = (
+        Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), sys.argv[4])
+    require(re.fullmatch(r"[0-9a-f]{64}", target_sha) is not None and scratch.is_dir() and
+            old_manifest in OLD_MANIFESTS, "invalid target pin, scratch or old manifest")
     require(hashlib.sha256(target.read_bytes()).hexdigest() == target_sha,
             "target archive differs from release pin")
     with tarfile.open(target, "r:gz") as archive:
@@ -164,22 +169,22 @@ def main() -> None:
         require(manifest_file is not None and
                 hashlib.sha256(manifest_file.read()).hexdigest() == NEW_MANIFEST,
                 "target manifest differs from release pin")
-    require(installed_manifest() == OLD_MANIFEST, "wrong initial server source")
+    require(installed_manifest() == old_manifest, "wrong initial server source")
     require(MARKER.is_file() and WEB_AGENT.is_dir(), "default install lacks managed Web Agent")
     SENTINEL.write_bytes(b"original\n")
     SENTINEL.chmod(0o600)
-    health(OLD_MANIFEST)
+    health(old_manifest)
 
     options = ConnectionOptions(host="127.0.0.1", user="root", port=22022,
                                 identity="/run/sovagrid-ci-client")
     installer = ServerInstaller(options)
     bad = scratch / "deliberate-failure.tar.gz"
     bad_sha = failure_candidate(target, bad)
-    update(installer, bad, bad_sha, OLD_MANIFEST, failure=True)
-    health(OLD_MANIFEST)
-    print("VM bridge rollback restored v0.14.0 and managed Web Agent", flush=True)
+    update(installer, bad, bad_sha, old_manifest, failure=True)
+    health(old_manifest)
+    print("VM bridge rollback restored prior server and managed Web Agent", flush=True)
 
-    update(installer, target, target_sha, OLD_MANIFEST, failure=False)
+    update(installer, target, target_sha, old_manifest, failure=False)
     health(NEW_MANIFEST)
     print("VM bridge applied v0.14.1 and preserved managed Web Agent", flush=True)
     signed_feed_ready()

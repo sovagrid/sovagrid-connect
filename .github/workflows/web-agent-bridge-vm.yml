@@ -6,6 +6,15 @@ name: Connect Web Agent migration on disposable Ubuntu
 # This expensive, root-changing test is manual only. It never uses a real host.
 on:
   workflow_dispatch:
+    inputs:
+      old_release:
+        description: Exact previous full-server release to migrate
+        required: true
+        default: '0.14.0'
+        type: choice
+        options:
+          - '0.14.0'
+          - '0.13.0'
 
 permissions:
   contents: read
@@ -19,8 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      OLD_ARCHIVE_SHA: 10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9
-      OLD_MANIFEST_SHA: c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286
+      OLD_RELEASE: ${{ inputs.old_release }}
       TARGET_ARCHIVE_SHA: c5786bb64467063196046144e665a98e347f40713facb37809b65a03eb70f347
       TARGET_MANIFEST_SHA: ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f
     steps:
@@ -41,19 +49,31 @@ jobs:
           sudo -n docker compose version >/dev/null
       - name: Download two exact public server releases
         run: |
+          case "$OLD_RELEASE" in
+            0.13.0)
+              old_archive_sha=7f42a3e3bf47ae63bd42cb4dac841880d9958376b610b59be343f83f1f780d17
+              old_manifest_sha=f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280
+              ;;
+            0.14.0)
+              old_archive_sha=10e1c444e5c9e6588c1c87b7cd78f80a8ced99502069a320e4329a425783dde9
+              old_manifest_sha=c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286
+              ;;
+            *) exit 1 ;;
+          esac
+          printf 'OLD_MANIFEST_SHA=%s\n' "$old_manifest_sha" >> "$GITHUB_ENV"
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --connect-timeout 15 --max-time 240 \
-            https://github.com/sovagrid/sovagrid-blueprint/releases/download/server-v0.14.0/SovaGrid-server-source.tar.gz \
+            "https://github.com/sovagrid/sovagrid-blueprint/releases/download/server-v${OLD_RELEASE}/SovaGrid-server-source.tar.gz" \
             -o "$RUNNER_TEMP/sovagrid-old.tar.gz"
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --connect-timeout 15 --max-time 240 \
             https://github.com/sovagrid/sovagrid-blueprint/releases/download/server-v0.14.1/SovaGrid-server-source.tar.gz \
             -o "$RUNNER_TEMP/sovagrid-target.tar.gz"
-          printf '%s  %s\n' "$OLD_ARCHIVE_SHA" "$RUNNER_TEMP/sovagrid-old.tar.gz" | sha256sum --check -
+          printf '%s  %s\n' "$old_archive_sha" "$RUNNER_TEMP/sovagrid-old.tar.gz" | sha256sum --check -
           printf '%s  %s\n' "$TARGET_ARCHIVE_SHA" "$RUNNER_TEMP/sovagrid-target.tar.gz" | sha256sum --check -
-          test "$(tar -xOzf "$RUNNER_TEMP/sovagrid-old.tar.gz" sovagrid-bundle.json | sha256sum | cut -d ' ' -f1)" = "$OLD_MANIFEST_SHA"
+          test "$(tar -xOzf "$RUNNER_TEMP/sovagrid-old.tar.gz" sovagrid-bundle.json | sha256sum | cut -d ' ' -f1)" = "$old_manifest_sha"
           test "$(tar -xOzf "$RUNNER_TEMP/sovagrid-target.tar.gz" sovagrid-bundle.json | sha256sum | cut -d ' ' -f1)" = "$TARGET_MANIFEST_SHA"
-      - name: Install the default v0.14.0 full server with managed Web Agent
+      - name: Install the selected old full server with managed Web Agent
         run: |
           sudo -n install -d -o root -g root -m 0755 /opt/sovagrid-src
           sudo -n tar -xzf "$RUNNER_TEMP/sovagrid-old.tar.gz" -C /opt/sovagrid-src --no-same-owner
@@ -101,7 +121,8 @@ jobs:
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
             SOVAGRID_BRIDGE_VM_FIXTURE=1 \
             python3 -B tests/web_agent_bridge_vm.py \
-            "$RUNNER_TEMP/sovagrid-target.tar.gz" "$TARGET_ARCHIVE_SHA" "$RUNNER_TEMP"
+            "$RUNNER_TEMP/sovagrid-target.tar.gz" "$TARGET_ARCHIVE_SHA" \
+            "$RUNNER_TEMP" "$OLD_MANIFEST_SHA"
       - name: Remove disposable SSH private keys
         if: always()
         run: |
