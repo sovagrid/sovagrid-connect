@@ -111,7 +111,7 @@ class RemoteUpdateTests(unittest.TestCase):
             script.write_text('#!/bin/bash\n# SOVAGRID_WEB_AGENT_INSTALL_V1\n')
             for name in ('compose.web-agent.yaml', 'web_agent_bundle.py',
                          'web_agent_jobs.py', 'web_agent_service.py',
-                         'web_wireguard_control.py', 'web_amnezia_provision.py',
+                         'web_wireguard_control.py', 'web_amnezia_provision.py', 'web_agent_features.py',
                          *code['WEB_AGENT_UNITS']):
                 target = source / 'sovagrid-blueprint/deploy' / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -121,7 +121,19 @@ class RemoteUpdateTests(unittest.TestCase):
                 target = source / 'sovagrid-vpn' / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text('fixture\n')
+            feature_files = ('sovagrid-blueprint/vendor/connect/sovagrid_connect/remote_feature_api.py',
+                             'sovagrid-web/agent-features.js', 'sovagrid-web/agent-features.css')
+            for name in feature_files:
+                target = source / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text('fixture\n')
             code['candidate_features_compatible'](source, [])
+            for name in feature_files:
+                target = source / name
+                target.unlink()
+                with self.assertRaises(code['UpdateFailure']):
+                    code['candidate_features_compatible'](source, [])
+                target.write_text('fixture\n')
             args, _ = code['compose_args'](source)
             self.assertIn(str(source / 'sovagrid-blueprint/deploy/compose.web-agent.yaml'), args)
             (source / 'sovagrid-blueprint/deploy/web_agent_jobs.py').unlink()
@@ -885,7 +897,8 @@ class RemoteUpdateTests(unittest.TestCase):
             for name in ('sovagrid-web/Dockerfile.ssh-gateway',
                          'sovagrid-web/gateway/package.json',
                          'sovagrid-web/gateway/package-lock.json',
-                         'sovagrid-web/gateway/server.js'):
+                         'sovagrid-web/gateway/server.js',
+                         'sovagrid-web/agent-features.js', 'sovagrid-web/agent-features.css'):
                 item = source / name
                 item.parent.mkdir(parents=True, exist_ok=True)
                 item.write_text('fixture\n')
@@ -899,6 +912,12 @@ class RemoteUpdateTests(unittest.TestCase):
                 code['candidate_features_compatible'](source, [])
             script.write_text(script.read_text() + '# SOVAGRID_PUBLIC_SSH_REFRESH_V1\n')
             code['candidate_features_compatible'](source, [])
+            for name in ('agent-features.js', 'agent-features.css'):
+                target = source / 'sovagrid-web' / name
+                target.unlink()
+                with self.assertRaises(code['UpdateFailure']):
+                    code['candidate_features_compatible'](source, [])
+                target.write_text('fixture\n')
 
     def test_existing_release_feed_blocks_candidate_without_feed_units(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
