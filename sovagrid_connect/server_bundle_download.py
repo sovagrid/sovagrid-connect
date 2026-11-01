@@ -22,12 +22,12 @@ from .installer import InstallError, MAX_ARCHIVE_BYTES, verify_bundle
 from .theme import preference_file
 
 
-PUBLISHED_SERVER_VERSION = "0.14.1"
+PUBLISHED_SERVER_VERSION = "1.0.0"
 PUBLISHED_SERVER_SOURCE_URL = (
     "https://github.com/sovagrid/sovagrid-blueprint/releases/download/"
     f"server-v{PUBLISHED_SERVER_VERSION}/SovaGrid-server-source.tar.gz"
 )
-PUBLISHED_SERVER_SOURCE_SHA256 = "c5786bb64467063196046144e665a98e347f40713facb37809b65a03eb70f347"
+PUBLISHED_SERVER_SOURCE_SHA256 = "3bf84864d79bfcc64cbbc56d37815d5fc172d27d6bca9e5db780606a9aea9a7a"
 _ASSET_HOST = "release-assets.githubusercontent.com"
 _ASSET_PREFIX = "/github-production-release-asset/"
 _CHUNK_BYTES = 256 * 1024

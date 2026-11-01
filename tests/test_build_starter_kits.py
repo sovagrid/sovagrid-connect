@@ -43,21 +43,25 @@ class StarterPinTests(unittest.TestCase):
         self.assertEqual(pins["_APPROVED_HUB_ONLY_UPDATE_BUNDLE_SHA256"],
                          PUBLISHED_SERVER_SOURCE_SHA256)
         self.assertEqual(pins["_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"],
-                         "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f")
+                         "94c0405382866d24f8b685a7df09c962a4e5f32cf2b5c9dd7b41f3644ea0cfbd")
 
-    def test_starter_manifest_is_in_runtime_advanced_allowlist(self) -> None:
+    def test_starter_and_older_manifests_remain_in_runtime_allowlists(self) -> None:
         source = Path(__file__).resolve().parents[1] / "sovagrid_connect/gui.py"
         module = ast.parse(source.read_text(encoding="utf-8"))
         assignments = [node for node in module.body if isinstance(node, ast.AnnAssign) and
                        isinstance(node.target, ast.Name) and
-                       node.target.id == "_APPROVED_ADVANCED_MANIFEST_SHA256S"]
-        self.assertEqual(len(assignments), 1)
-        approved = ast.literal_eval(assignments[0].value)
-        self.assertEqual(approved, (
+                       node.target.id in {"_APPROVED_ADVANCED_MANIFEST_SHA256S",
+                                          "_APPROVED_RELEASE_FEED_MANIFEST_SHA256S"}]
+        self.assertEqual(len(assignments), 2)
+        expected = (
             "f6d3b246d29661ffac4975f78dbc3a5481405b47e23826ea30a388e41f2b1280",
             "c57e46f652fcf8d3cf2ddd9e10957dedfe56e7709ccffabdd5081bb60a12e286",
+            "ec6f567b0292916dd3f104f1441451708a955b79d02ef91f82237a8cf8603f1f",
             approved_release_pins()["_APPROVED_LOCAL_OPERATIONS_MANIFEST_SHA256"],
-        ))
+        )
+        for assignment in assignments:
+            with self.subTest(allowlist=assignment.target.id):
+                self.assertEqual(ast.literal_eval(assignment.value), expected)
 
     def test_exact_imported_alias_resolves_without_running_gui(self) -> None:
         gui = IMPORT + "_APPROVED_SERVER_SOURCE_SHA256 = PUBLISHED_SERVER_SOURCE_SHA256\n" + PINS
