@@ -54,7 +54,7 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         env:
           SOVAGRID_GUI_TESTS: '1'
-        run: timeout --signal=TERM --kill-after=10s 90s xvfb-run -a /usr/bin/python3 -u -m unittest discover -s tests -p 'test_*_dialog.py' -v
+        run: timeout --signal=TERM --kill-after=10s 90s xvfb-run -a /usr/bin/python3 -u tests/run_tk_dialogs.py
 
   bundle:
     name: Bundle / ${{ matrix.os }}
