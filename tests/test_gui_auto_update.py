@@ -29,9 +29,12 @@ class GuiAutoUpdateTests(unittest.TestCase):
         launcher.tunnel = None
         launcher.root = Mock()
         launcher.status = Mock()
-        launcher.install_button = launcher.feature_button = Mock()
-        launcher.update_button = launcher.connect_button = Mock()
+        launcher.install_button = Mock()
+        launcher.feature_button = Mock()
+        launcher.update_button = Mock()
+        launcher.connect_button = Mock()
         launcher.update_start_button = None
+        launcher.update_source_controls = []
         launcher._options = lambda: ConnectionOptions("server.example", "root")
         launcher._auto_policy_store = lambda: SimpleNamespace(load=lambda _key: SimpleNamespace(due=lambda _now: True))
         return launcher
@@ -56,6 +59,26 @@ class GuiAutoUpdateTests(unittest.TestCase):
         launcher._auto_update_inflight = False
         launcher._end_update_work()
         self.assertFalse(launcher.installing)
+        self.assertIsNone(launcher.update_manager)
+        for button in (launcher.install_button, launcher.feature_button,
+                       launcher.update_button, launcher.connect_button):
+            button.configure.assert_called_with(state="normal")
+
+    def test_finished_update_restores_source_controls_and_start_button(self):
+        launcher = self.launcher()
+        launcher.installing = True
+        launcher.update_manager = Mock()
+        launcher.update_start_button = Mock()
+        launcher.update_source_controls = [Mock(name="choose_archive"),
+                                           Mock(name="release_source"), Mock(name="local_source")]
+        for control in [launcher.update_start_button, *launcher.update_source_controls]:
+            control.configure(state="disabled")
+        launcher._end_update_work()
+        self.assertFalse(launcher.installing)
+        self.assertIsNone(launcher.update_manager)
+        for control in [launcher.update_start_button, *launcher.update_source_controls]:
+            self.assertEqual(control.configure.call_args_list,
+                             [unittest.mock.call(state="disabled"), unittest.mock.call(state="normal")])
 
     def test_open_management_form_defers_auto_apply(self):
         launcher = self.launcher()
