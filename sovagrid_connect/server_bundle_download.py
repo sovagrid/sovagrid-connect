@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from . import __version__
 from .installer import InstallError, MAX_ARCHIVE_BYTES, verify_bundle
 from .theme import preference_file
 
@@ -63,7 +64,7 @@ def _download_into(destination: Path, *, progress: Callable[[str], None] | None 
                    opener=None) -> None:
     opener = opener or build_opener(_ReleaseRedirectHandler())
     request = Request(PUBLISHED_SERVER_SOURCE_URL, headers={
-        "User-Agent": "SovaGrid-Connect/0.8.0",
+        "User-Agent": f"SovaGrid-Connect/{__version__}",
         "Accept-Encoding": "identity",
     })
     digest = hashlib.sha256()

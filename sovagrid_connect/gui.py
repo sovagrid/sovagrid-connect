@@ -40,6 +40,7 @@ from .service_setup_dialog import ServiceSetupDialog
 from .container_action_setup_dialog import ContainerActionSetupDialog
 from .hub_backup_dialog import HubBackupDialog
 from .host_backup_dialog import HostBackupDialog
+from .portable_restore_dialog import PortableRestoreDialog
 from .vpn_setup_dialog import RoutingDialog, AmneziaDialog
 from .promotion import verify_promoted_panel
 from .server_status import ServerStatus
@@ -133,6 +134,7 @@ class Launcher:
         self.container_action_setup_window: ContainerActionSetupDialog | None = None
         self.hub_backup_window: HubBackupDialog | None = None
         self.host_backup_window: HostBackupDialog | None = None
+        self.restore_window: PortableRestoreDialog | None = None
         self.routing_window: RoutingDialog | None = None
         self.amnezia_window: AmneziaDialog | None = None
         self.initial_password = tk.StringVar(value="")
@@ -308,6 +310,9 @@ class Launcher:
         self.host_backup_button = ttk.Button(
             backup_row, text="Полные копии сервера…", command=self.open_host_backup)
         self.host_backup_button.pack(side="left", padx=(8, 0))
+        self.restore_button = ttk.Button(
+            backup_row, text="Восстановить из копии…", command=self.open_restore)
+        self.restore_button.pack(side="left", padx=(8, 0))
 
         def select_theme(_event=None) -> None:
             selected = CHOICES.get(theme_value.get())
@@ -401,7 +406,7 @@ class Launcher:
         for name in ("promotion_window", "hub_only_update_window", "local_operations_window",
                      "local_container_inventory_window",
                      "service_setup_window", "container_action_setup_window",
-                     "hub_backup_window", "host_backup_window",
+                     "hub_backup_window", "host_backup_window", "restore_window",
                      "routing_window", "amnezia_window",
                      "local_commands_window", "release_feed_window",
                      "remote_features_window",
@@ -622,6 +627,36 @@ class Launcher:
         self.host_backup_window = None
         if self.closing:
             self.on_close()
+
+    def open_restore(self) -> None:
+        if self._lift_management_window():
+            return
+        if self.installing or self.connecting:
+            self.status.set("Дождитесь завершения текущей операции с сервером.")
+            return
+        try:
+            options = self._options().validated()
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Восстановление сервера", str(error), parent=self.root)
+            return
+        self.restore_window = PortableRestoreDialog(
+            self.root, self.theme, options, self.restore_closed,
+            on_ready=lambda: self.connect_restored(options))
+
+    def restore_closed(self) -> None:
+        self.restore_window = None
+        if self.closing:
+            self.on_close()
+
+    def connect_restored(self, options: ConnectionOptions) -> None:
+        # The main fields may have changed while the target dialog was open.
+        # Reopen the exact reviewed SSH route, including both selected keys.
+        self.disconnect()
+        for key in ("host", "user", "port", "jump_host", "jump_user", "jump_port",
+                    "identity", "jump_identity", "host_key_alias", "jump_host_key_alias", "local_port"):
+            value = getattr(options, key)
+            self.values[key].set("" if value is None else str(value))
+        self.connect()
 
     def open_routing(self) -> None:
         if self._lift_management_window():
@@ -1853,6 +1888,10 @@ class Launcher:
                 button.configure(state="normal")
 
     def on_close(self) -> None:
+        if getattr(self, "restore_window", None) is not None:
+            self.closing = True
+            self.restore_window.close()
+            return
         if getattr(self, "host_backup_window", None) is not None:
             if self.host_backup_window.busy:
                 self.host_backup_window.close()
@@ -2009,7 +2048,8 @@ class Launcher:
                            "Скачать и проверить серверный пакет с GitHub")
                         + " с терминалом, файлами, мониторингом контейнеров и управлением WireGuard, "
                         "а затем открыть панель? Сам VPN включается отдельно. "
-                        "Нужны root или sudo без пароля.",
+                        "Нужны root или sudo без пароля. Для переноса существующей копии выберите "
+                        "«Нет», затем «Восстановить из копии…» в основном окне.",
                         parent=self.root,
                     ):
                         self._auto_install_and_connect(tunnel, nearby[0] if approved else None)
